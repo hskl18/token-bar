@@ -1,0 +1,40 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift Package Manager and Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+
+# Local builds and release artifacts
+build/
+dist/
+*.dmg
+*.pkg
+*.zip
+SHA256SUMS
+
+# Local editor and agent instructions
+.idea/
+.vscode/
+.claude/
+.codex/
+CLAUDE.md
+
+# Environment files and signing material
+.env
+.env.*
+!.env.example
+*.cer
+*.p8
+*.p12
+*.keychain
+*.keychain-db
+*.mobileprovision
+*.provisionprofile
+notarytool-*.json
