@@ -1,10 +1,12 @@
 # Token Bar
 
-<img align="right" src="docs/screenshots/token-bar-dashboard.png" alt="Token Bar dashboard for Claude Code and Codex" width="250">
-
 A native macOS menu bar monitor for Claude Code and OpenAI Codex.
 
 **macOS 14+ · Swift 5.10 · MIT**
+
+<p align="center">
+  <img src="docs/screenshots/token-bar-dashboard.png" alt="Token Bar dashboard for Claude Code and Codex" width="360">
+</p>
 
 ## At a glance
 
@@ -30,8 +32,6 @@ open "build/Token Bar.app"
 Sign in to Claude Code, Codex CLI, or Codex Desktop before refreshing Token Bar.
 Building and running the app does not require administrator access.
 macOS may request access to the user's login Keychain for Claude usage data.
-
-<br clear="right">
 
 ## How it works
 
