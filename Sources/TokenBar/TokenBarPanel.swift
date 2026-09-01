@@ -543,11 +543,7 @@ private struct FooterBar: View {
             .font(.system(size: 13, weight: .semibold))
             .foregroundStyle(Palette.ink)
             .frame(width: 36, height: 28)
-            .appleConcentricSurface(
-                fill: Color.black.opacity(0.18),
-                border: Palette.separator.opacity(0.24),
-                fallbackRadius: AppleGeometry.controlFallbackRadius
-            )
+            .footerControlSurface()
     }
 
     private func updatedText(at now: Date) -> String {
@@ -671,6 +667,34 @@ private extension View {
             let shape = RoundedRectangle(cornerRadius: fallbackRadius, style: .continuous)
             background(fill, in: shape)
                 .overlay { shape.stroke(border, lineWidth: 1) }
+        }
+    }
+
+    @ViewBuilder
+    func footerControlSurface() -> some View {
+        if #available(macOS 26.0, *) {
+            let shape = ConcentricRectangle(
+                corners: .concentric(
+                    minimum: .fixed(AppleGeometry.controlFallbackRadius)
+                ),
+                isUniform: true
+            )
+            containerShape(
+                RoundedRectangle(
+                    cornerRadius: AppleGeometry.controlFallbackRadius,
+                    style: .continuous
+                )
+            )
+                .glassEffect(.regular, in: shape)
+        } else {
+            let shape = RoundedRectangle(
+                cornerRadius: AppleGeometry.controlFallbackRadius,
+                style: .continuous
+            )
+            background(.thinMaterial, in: shape)
+                .overlay {
+                    shape.stroke(Color.white.opacity(0.42), lineWidth: 1)
+                }
         }
     }
 }
