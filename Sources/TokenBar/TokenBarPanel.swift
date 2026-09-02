@@ -205,9 +205,9 @@ private struct UsageActivityGroup: View {
         case .overview:
             value = store.snapshot.combinedCapacityPercent
         case .claude:
-            value = store.snapshot.claude.headlinePercent
+            value = store.snapshot.claude.weeklyPercent
         case .codex:
-            value = store.snapshot.codex.headlinePercent
+            value = store.snapshot.codex.weeklyPercent
         }
         return value.map { "\(Int($0.rounded()))%" } ?? "--"
     }
