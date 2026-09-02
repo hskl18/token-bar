@@ -92,6 +92,16 @@ struct ProviderSnapshot: Codable, Hashable {
             .max()
     }
 
+    var weeklyPercent: Double? {
+        let windows = [longWindow, shortWindow].compactMap { $0 } + extraWindows
+        guard let percent = windows.first(where: {
+            $0.windowMinutes == 7 * 24 * 60
+        })?.usedPercent, percent.isFinite else {
+            return nil
+        }
+        return min(100, max(0, percent))
+    }
+
     var isStale: Bool { stale == true }
 
     var hasDisplayableData: Bool {
@@ -422,7 +432,7 @@ struct AppSnapshot: Codable, Hashable {
             guard let capacity,
                   capacity.isFinite,
                   capacity > 0,
-                  let percent = weeklyPercent(in: provider)
+                  let percent = provider.weeklyPercent
             else {
                 return nil
             }
@@ -444,19 +454,6 @@ struct AppSnapshot: Codable, Hashable {
         case (false, true): return .codexOnly
         case (true, true): return .both
         }
-    }
-
-    private func weeklyPercent(in provider: ProviderSnapshot) -> Double? {
-        let windows = [provider.longWindow, provider.shortWindow].compactMap { $0 }
-            + provider.extraWindows
-        guard let percent = windows
-            .first(where: { $0.windowMinutes == 7 * 24 * 60 })?
-            .usedPercent,
-            percent.isFinite
-        else {
-            return nil
-        }
-        return min(100, max(0, percent))
     }
 }
 

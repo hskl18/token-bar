@@ -5,7 +5,7 @@ A native macOS menu bar monitor for Claude Code and OpenAI Codex.
 **macOS 14+ · Swift 5.10 · MIT**
 
 <p align="center">
-  <img src="docs/screenshots/token-bar-dashboard.png" alt="Token Bar dashboard for Claude Code and Codex" width="360">
+  <img src="docs/screenshots/token-bar-dashboard.png" alt="Token Bar dashboard for Claude Code and Codex" width="280">
 </p>
 
 ## At a glance
