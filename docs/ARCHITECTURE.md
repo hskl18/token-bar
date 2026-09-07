@@ -28,6 +28,9 @@ Token Bar tries the next candidate when a runtime is missing, incompatible, or s
 
 The presentation layer derives one of four states from displayable provider data: none, Claude-only, Codex-only, or both.
 Only the dual-provider state renders All, and each state has its own compact panel height.
+Codex shows every returned quota window, ordered by duration, and expands the panel for additional rows.
+A missing 5-hour window is never inferred from the plan name; Plus, Pro, and future plans follow the account response.
+Provider headers and combined capacity continue to use the weekly percentage.
 
 ## Transcript parsing
 

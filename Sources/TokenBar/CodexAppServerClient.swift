@@ -41,7 +41,7 @@ struct CodexAppServerClient {
                 do {
                     let responses = try runServer(executableURL: candidate.executableURL)
                     let result = CodexFetchResult(
-                        quota: Result { try parseQuota(responses[2]) },
+                        quota: Result { try parseCodexQuota(responses[2]) },
                         activity: Result { try parseActivity(responses[3]) }
                     )
                     if result.hasUsableResponse {
@@ -183,7 +183,7 @@ private func readResponses(
     }
 }
 
-private func parseQuota(_ response: [String: Any]?) throws -> ProviderSnapshot {
+func parseCodexQuota(_ response: [String: Any]?) throws -> ProviderSnapshot {
     let result = try resultDictionary(response)
     let legacyLimits = dictionary(result["rateLimits"])
     let rawBuckets = dictionary(result["rateLimitsByLimitId"])

@@ -109,7 +109,7 @@ struct RootView: View {
         }
         .frame(
             width: TokenBarLayout.panelWidth,
-            height: TokenBarLayout.panelHeight(for: store.snapshot.presentation)
+            height: TokenBarLayout.panelHeight(for: store.snapshot)
         )
         .foregroundStyle(Palette.ink)
         .tokenBarPanelSurface()
@@ -134,10 +134,9 @@ private struct UnifiedUsagePage: View {
             }
         }
         if presentation.showsCodex {
-            let codexWindows = [store.snapshot.codex.longWindow, store.snapshot.codex.shortWindow]
-                .compactMap { $0 } + store.snapshot.codex.extraWindows
-            if let window = codexWindows.max(by: { $0.usedPercent < $1.usedPercent }) {
-                items.append(NamedWindow(provider: "Codex", color: Palette.codex, window: window))
+            for window in store.snapshot.codex.displayWindows {
+                let provider = window.limitID.map { $0 == "codex" ? "Codex" : "Codex · \($0)" } ?? "Codex"
+                items.append(NamedWindow(provider: provider, color: Palette.codex, window: window))
             }
         }
         return items

@@ -92,6 +92,17 @@ struct ProviderSnapshot: Codable, Hashable {
             .max()
     }
 
+    var displayWindows: [LimitWindow] {
+        var seen = Set<String>()
+        return ([shortWindow, longWindow].compactMap { $0 } + extraWindows)
+            .filter { seen.insert($0.id).inserted }
+            .sorted {
+                let left = $0.windowMinutes ?? Int.max
+                let right = $1.windowMinutes ?? Int.max
+                return left == right ? $0.id < $1.id : left < right
+            }
+    }
+
     var weeklyPercent: Double? {
         let windows = [longWindow, shortWindow].compactMap { $0 } + extraWindows
         guard let percent = windows.first(where: {

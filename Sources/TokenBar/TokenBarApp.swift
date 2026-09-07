@@ -49,7 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             contentViewController: NSHostingController(
                 rootView: RootView().environmentObject(store)
             ),
-            contentSize: TokenBarLayout.panelSize(for: store.snapshot.presentation)
+            contentSize: TokenBarLayout.panelSize(for: store.snapshot)
         )
 
         usageItem = makeStatusItem(toolTip: "Yellow: Claude · Blue: Codex · White: available")
@@ -58,7 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] snapshot in
                 self?.updateStatusItems()
                 self?.statusPanel?.updateContentSize(
-                    TokenBarLayout.panelSize(for: snapshot.presentation)
+                    TokenBarLayout.panelSize(for: snapshot)
                 )
             }
             .store(in: &cancellables)
