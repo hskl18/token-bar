@@ -28,9 +28,15 @@ Token Bar tries the next candidate when a runtime is missing, incompatible, or s
 
 The presentation layer derives one of four states from displayable provider data: none, Claude-only, Codex-only, or both.
 Only the dual-provider state renders All, and each state has its own compact panel height.
-Codex shows every returned quota window, ordered by duration, and expands the panel for additional rows.
+Codex shows every returned quota window and expands the panel for additional rows.
+The UI groups rows by quota bucket, places the main Codex bucket first, and orders each bucket by duration.
+The parser retains the server's `limitName` for presentation; older cached Spark windows use a known-name fallback.
 A missing 5-hour window is never inferred from the plan name; Plus, Pro, and future plans follow the account response.
 Provider headers and combined capacity continue to use the weekly percentage.
+
+The status item owns a native `NSMenu` containing the SwiftUI view.
+AppKit handles menu tracking and dismissal, and the app refreshes stale data when the menu opens.
+The root SwiftUI view leaves the outer background to the native menu to avoid stacked glass borders.
 
 ## Transcript parsing
 

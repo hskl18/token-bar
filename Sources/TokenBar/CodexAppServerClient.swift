@@ -273,7 +273,9 @@ private func resultDictionary(_ response: [String: Any]?) throws -> [String: Any
 private func parseLimitWindows(_ value: [String: Any], limitID: String) -> [LimitWindow] {
     ["primary", "secondary"].compactMap { key in
         guard let rawWindow = dictionary(value[key]) else { return nil }
-        return parseLimitWindow(rawWindow, limitID: limitID)
+        var window = parseLimitWindow(rawWindow, limitID: limitID)
+        window?.limitName = string(value["limitName"])
+        return window
     }
 }
 

@@ -58,6 +58,15 @@ struct LimitWindow: Codable, Hashable, Identifiable {
     var windowMinutes: Int?
     var resetsAt: Date?
     var limitID: String? = nil
+    var limitName: String? = nil
+
+    var quotaDisplayName: String {
+        guard let limitID, limitID != "codex" else { return "Codex" }
+        if let limitName, !limitName.isEmpty { return limitName }
+        // Older cached snapshots did not persist the server's display name.
+        if limitID == "codex_bengalfox" { return "GPT-5.3-Codex-Spark" }
+        return "Additional quota"
+    }
 
     var id: String {
         "\(limitID ?? "default"):\(windowMinutes ?? -1):\(label)"
