@@ -13,7 +13,6 @@ private enum Palette {
 }
 
 private enum AppleGeometry {
-    static let panelFallbackRadius: CGFloat = 20
     static let groupFallbackRadius: CGFloat = 14
     static let controlFallbackRadius: CGFloat = 10
 }
@@ -109,10 +108,9 @@ struct RootView: View {
         }
         .frame(
             width: TokenBarLayout.panelWidth,
-            height: TokenBarLayout.panelHeight(for: store.snapshot.presentation)
+            height: TokenBarLayout.panelHeight(for: store.snapshot)
         )
         .foregroundStyle(Palette.ink)
-        .tokenBarPanelSurface()
     }
 }
 
@@ -134,10 +132,19 @@ private struct UnifiedUsagePage: View {
             }
         }
         if presentation.showsCodex {
-            let codexWindows = [store.snapshot.codex.longWindow, store.snapshot.codex.shortWindow]
-                .compactMap { $0 } + store.snapshot.codex.extraWindows
-            if let window = codexWindows.max(by: { $0.usedPercent < $1.usedPercent }) {
-                items.append(NamedWindow(provider: "Codex", color: Palette.codex, window: window))
+            let groupedWindows = store.snapshot.codex.displayWindows.sorted {
+                let leftBucket = $0.limitID ?? "codex"
+                let rightBucket = $1.limitID ?? "codex"
+                if leftBucket != rightBucket {
+                    if leftBucket == "codex" { return true }
+                    if rightBucket == "codex" { return false }
+                    return leftBucket < rightBucket
+                }
+                return ($0.windowMinutes ?? Int.max) < ($1.windowMinutes ?? Int.max)
+            }
+            for window in groupedWindows {
+                let provider = window.quotaDisplayName
+                items.append(NamedWindow(provider: provider, color: Palette.codex, window: window))
             }
         }
         return items
@@ -168,7 +175,7 @@ private struct UnifiedUsagePage: View {
             } else if !namedWindows.isEmpty {
                 PanelCard {
                     VStack(spacing: 12) {
-                        ForEach(Array(namedWindows.enumerated()), id: \.element.id) { index, item in
+                        ForEach(Array(namedWindows.enumerated()), id: \.element.window.id) { index, item in
                             WindowRow(
                                 name: "\(item.provider) · \(compactWindowLabel(item.window.label))",
                                 window: item.window,
@@ -613,40 +620,6 @@ private struct PanelCard<Content: View>: View {
 }
 
 private extension View {
-    @ViewBuilder
-    func tokenBarPanelSurface() -> some View {
-        if #available(macOS 26.0, *) {
-            let shape = ConcentricRectangle(
-                corners: .concentric(
-                    minimum: .fixed(AppleGeometry.panelFallbackRadius)
-                ),
-                isUniform: true
-            )
-            containerShape(
-                RoundedRectangle(
-                    cornerRadius: AppleGeometry.panelFallbackRadius,
-                    style: .continuous
-                )
-            )
-                .glassEffect(.regular, in: shape)
-        } else {
-            background(.regularMaterial)
-                .clipShape(
-                    RoundedRectangle(
-                        cornerRadius: AppleGeometry.panelFallbackRadius,
-                        style: .continuous
-                    )
-                )
-                .overlay {
-                    RoundedRectangle(
-                        cornerRadius: AppleGeometry.panelFallbackRadius,
-                        style: .continuous
-                    )
-                        .stroke(Palette.separator.opacity(0.42), lineWidth: 1)
-                }
-        }
-    }
-
     @ViewBuilder
     func appleConcentricSurface(
         fill: Color,

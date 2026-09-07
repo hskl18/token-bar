@@ -26,6 +26,8 @@ That prompt grants credential access and does not grant Token Bar administrator 
 
 ## Checks
 
+See the [subscription preview gallery](SUBSCRIPTION-PREVIEWS.md) for four captured provider scenarios, fixture boundaries, and local preview commands.
+
 ```sh
 swift test
 ./scripts/build-app.sh
