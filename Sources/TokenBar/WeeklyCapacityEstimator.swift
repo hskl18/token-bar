@@ -19,21 +19,32 @@ struct WeeklyCapacityEstimator {
 
         let startedAt = resetsAt.addingTimeInterval(-Double(minutes) * 60)
         let windowKey = "\(window.id):\(Int(startedAt.timeIntervalSince1970.rounded()))"
+        let sample = WeeklyCapacitySample(
+            windowKey: windowKey,
+            windowStartedAt: startedAt,
+            resetsAt: resetsAt,
+            observedAt: observedAt,
+            usedPercent: window.usedPercent,
+            observedTokens: observedTokens,
+            equivalentTokens: window.usedPercent > 0
+                ? Double(observedTokens) * 100 / window.usedPercent : 0,
+            source: source
+        )
+
+        // Match the account baseline's two-second tolerance. Exact timestamp keys
+        // can split one quota window into several priors, including in saved history.
+        var uniqueSamples: [WeeklyCapacitySample] = []
+        for existing in history.samples.sorted(by: { $0.observedAt > $1.observedAt }) {
+            if !uniqueSamples.contains(where: { sameWindow($0, existing) }) {
+                uniqueSamples.append(existing)
+            }
+        }
+        history.samples = uniqueSamples
+
         if observedTokens > 0, window.usedPercent > 0 {
-            let implied = Double(observedTokens) * 100 / window.usedPercent
-            if implied.isFinite, implied > 0 {
-                let sample = WeeklyCapacitySample(
-                    windowKey: windowKey,
-                    windowStartedAt: startedAt,
-                    resetsAt: resetsAt,
-                    observedAt: observedAt,
-                    usedPercent: window.usedPercent,
-                    observedTokens: observedTokens,
-                    equivalentTokens: implied,
-                    source: source
-                )
+            if sample.equivalentTokens.isFinite, sample.equivalentTokens > 0 {
                 if let index = history.samples.firstIndex(where: {
-                    $0.windowKey == windowKey && $0.source == source
+                    sameWindow($0, sample)
                 }) {
                     history.samples[index] = sample
                 } else {
@@ -49,20 +60,20 @@ struct WeeklyCapacityEstimator {
             history.samples.removeLast(history.samples.count - 12)
         }
 
-        let priorValues = history.samples.compactMap { sample -> Double? in
-            guard sample.windowKey != windowKey,
-                  sample.source == source,
-                  sample.usedPercent >= 10,
-                  sample.equivalentTokens.isFinite,
-                  sample.equivalentTokens > 0
+        let priorValues = history.samples.compactMap { prior -> Double? in
+            guard !sameWindow(prior, sample),
+                  prior.source == source,
+                  prior.usedPercent >= 10,
+                  prior.equivalentTokens.isFinite,
+                  prior.equivalentTokens > 0
             else {
                 return nil
             }
-            return sample.equivalentTokens
+            return prior.equivalentTokens
         }
         let prior = robustCenter(priorValues)
         let current = history.samples.first(where: {
-            $0.windowKey == windowKey && $0.source == source
+            sameWindow($0, sample)
         }).flatMap { sample in
             sample.usedPercent >= 3 ? sample.equivalentTokens : nil
         }
@@ -93,6 +104,15 @@ struct WeeklyCapacityEstimator {
             observedTokens: observedTokens,
             equivalentTokens: equivalentTokens
         )
+    }
+
+    private static func sameWindow(_ lhs: WeeklyCapacitySample, _ rhs: WeeklyCapacitySample) -> Bool {
+        let lhsID = lhs.windowKey.prefix(upTo: lhs.windowKey.lastIndex(of: ":") ?? lhs.windowKey.endIndex)
+        let rhsID = rhs.windowKey.prefix(upTo: rhs.windowKey.lastIndex(of: ":") ?? rhs.windowKey.endIndex)
+        return lhsID == rhsID
+            && lhs.source == rhs.source
+            && abs(lhs.windowStartedAt.timeIntervalSince(rhs.windowStartedAt)) < 2
+            && abs(lhs.resetsAt.timeIntervalSince(rhs.resetsAt)) < 2
     }
 
     private static func robustCenter(_ values: [Double]) -> Double? {
