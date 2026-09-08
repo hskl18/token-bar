@@ -26,6 +26,9 @@ SHA256SUMS
 .codex/
 CLAUDE.md
 
+# Private investigation notes and local diagnostic artifacts
+/.local/
+
 # Environment files and signing material
 .env
 .env.*

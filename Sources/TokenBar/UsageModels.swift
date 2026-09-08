@@ -404,6 +404,7 @@ struct AppSnapshot: Codable, Hashable {
     var codexActivityError: String?
     var codexActivityLastSuccessAt: Date?
     var codexTodayIsLocalEstimate: Bool?
+    var imageGenerationUsage: ImageGenerationUsage? = nil
     var updatedAt: Date?
 
     static let empty = AppSnapshot(
