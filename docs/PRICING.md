@@ -59,6 +59,8 @@ weekly value = estimated weekly capacity × current-window USD per token
 Current-window observations become eligible at 3% used.
 Earlier windows with at least 10% usage can supply same-source priors.
 Token Bar retains 12 samples for 70 days, removes large median-absolute-deviation outliers, and blends the robust prior with the current observation in log space.
+Observations from the same quota bucket and source with start and reset times less than two seconds apart count as one window, retaining its latest sample, including when loading older history.
+When the account counter has not increased in a new window, a prior capacity can still be priced using the current local model mix, so the dollar projection can change before a current account sample is available.
 
 Claude uses available local records inside the official 7-day interval.
 Another computer can raise the Claude percentage without adding records on this Mac.
