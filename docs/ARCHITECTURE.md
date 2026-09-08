@@ -19,6 +19,7 @@ Official prices + fallback ─ PriceCatalog ─ CostLedger ──┘
 `TokenActivity` contains calendar token totals.
 `CostLedger` contains day-specific local model and token-category prices.
 `WeeklyCapacityHistory` contains a bounded set of derived 7-day capacity observations.
+`ImageGenerationUsage` contains saved-file-based estimates, separate from provider token activity.
 
 These values remain separate because an official quota percentage is not a token counter and an API-equivalent dollar estimate is not a bill.
 
@@ -48,7 +49,8 @@ Both use the same Claude record parser and the same `message.id + requestId` ide
 `CodexWindowSampler` uses it for the current official weekly interval.
 `CodexMixSampler` uses it for the available calendar year.
 
-Keeping Codex schema interpretation in one parser prevents calendar dollars and weekly capacity from drifting into different counting rules.
+Sharing the parser keeps local schema interpretation consistent.
+Account and local sources can still differ in scope and timing; see [pricing limits](PRICING.md#limits).
 
 ## Pricing
 
@@ -77,6 +79,7 @@ Launch migration imports only the reusable snapshot from QuotaBar Lite and remov
 The original legacy application domain is left untouched.
 
 Unchanged refreshes seek directly to saved byte offsets.
+The ImageGen sampler uses the existing refresh cadence, reads PNG headers/end markers and caches records by generation ID without decoding pixels.
 A truncated or removed source file invalidates the affected local ledger and triggers a deterministic rebuild instead of applying deltas to the wrong history.
 
 An August 30, 2026 arm64 release build measured 1.8 MB on an M3 Pro MacBook Pro.

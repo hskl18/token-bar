@@ -245,7 +245,7 @@ private struct UsageActivityGroup: View {
                         .foregroundStyle(Palette.secondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
-                        .help("Estimated API-equivalent tokens and value at 100% of this provider's weekly window")
+                        .help(store.weeklyCostHelp(for: provider))
                 }
                 Spacer()
                 percentStatus
@@ -375,6 +375,7 @@ private struct ActivitySection: View {
             tokens: tokens,
             estimatedCost: store.estimatedCost(for: provider, period: period)
         )
+        .help(store.imageCostHelp(for: provider, period: period))
     }
 }
 
@@ -392,16 +393,19 @@ private struct CombinedActivitySection: View {
                 tokens: today.tokens,
                 estimatedCost: today.estimatedCost
             )
+            .help(store.imageCostHelp(for: .overview, period: .today))
             ActivityTile(
                 label: "THIS WEEK",
                 tokens: week.tokens,
                 estimatedCost: week.estimatedCost
             )
+            .help(store.imageCostHelp(for: .overview, period: .week))
             ActivityTile(
                 label: "THIS MONTH",
                 tokens: month.tokens,
                 estimatedCost: month.estimatedCost
             )
+            .help(store.imageCostHelp(for: .overview, period: .month))
         }
     }
 

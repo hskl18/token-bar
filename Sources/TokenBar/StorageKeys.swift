@@ -7,6 +7,7 @@ enum StorageKeys {
     static let codexLastKnownMix = "tokenbar.codex-last-known-mix.v2"
     static let codexRuntimeExecutable = "tokenbar.codex-runtime-executable.v1"
     static let priceCache = "tokenbar.price-cache.v4"
+    static let imageGenerationUsage = "tokenbar.image-generation-usage.v1"
 
     static let active: Set<String> = [
         snapshot,
@@ -17,6 +18,7 @@ enum StorageKeys {
         codexLastKnownMix,
         codexRuntimeExecutable,
         priceCache,
+        imageGenerationUsage,
     ]
 
     static func isObsolete(_ key: String) -> Bool {

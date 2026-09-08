@@ -30,6 +30,7 @@ final class TokenBarStore: ObservableObject {
             force: snapshot.updatedAt == nil
                 || snapshot.codexCostLedger == nil
                 || snapshot.claudeCostLedger == nil
+                || snapshot.imageGenerationUsage == nil
                 || (snapshot.codexWeeklyEstimateSource == nil
                     && snapshot.codex.headlinePercent != nil)
         )
@@ -79,14 +80,17 @@ final class TokenBarStore: ObservableObject {
                 : nil
             async let claudeLedgerResult = ClaudeMixSampler().update()
             async let codexUsageLedgerResult = CodexMixSampler().update()
+            async let imageUsageResult = ImageGenerationSampler().update()
 
-            let (codex, claude, claudeLedger, codexUsageLedger) = await (
+            let (codex, claude, claudeLedger, codexUsageLedger, imageUsage) = await (
                 codexResult,
                 claudeResult,
                 claudeLedgerResult,
-                codexUsageLedgerResult
+                codexUsageLedgerResult,
+                imageUsageResult
             )
             guard !Task.isCancelled, refreshGeneration == generation else { return }
+            snapshot.imageGenerationUsage = imageUsage
 
             var officialCodexActivity: TokenActivity?
             var codexSucceeded = false
@@ -270,30 +274,55 @@ final class TokenBarStore: ObservableObject {
         let activity = tokenActivity(for: provider)
         let interval = period.interval()
         let tokens = activity.tokens(in: interval)
-        if tokens == 0 { return 0 }
+        let imageCost = provider == .codex
+            ? snapshot.imageGenerationUsage?.cost(in: interval) ?? 0 : 0
+        if tokens == 0 { return imageCost }
         let ledger = provider == .claude
             ? snapshot.claudeCostLedger
             : snapshot.codexCostLedger
         let mix = ledger?.mix(for: activity.dayKeys(in: interval)) ?? .empty
-        return mix.estimate(tokens: tokens)
-    }
-
-    func codexWeeklyValueStatus() -> WeeklyValueStatus {
-        if let estimate = snapshot.codexWeeklyValue {
-            return .available(estimate)
-        }
-        return .unavailable(snapshot.codexWeeklyValueError ?? "Waiting for an account-wide weekly baseline.")
+        return mix.estimate(tokens: tokens).map { $0 + imageCost }
     }
 
     func weeklyValue(for provider: ProviderScope) -> WeeklyValueEstimate? {
         switch provider {
         case .overview:
-            nil
+            return nil
         case .claude:
-            snapshot.claudeWeeklyValue
+            return snapshot.claudeWeeklyValue
         case .codex:
-            snapshot.codexWeeklyValue
+            guard var estimate = snapshot.codexWeeklyValue else { return nil }
+            guard let window = weeklyWindow(in: snapshot.codex),
+                  let reset = window.resetsAt, reset > Date(),
+                  estimate.usedPercent > 0, estimate.usedPercent == window.usedPercent,
+                  let interval = codexImageInterval else { return estimate }
+            let imageCost = snapshot.imageGenerationUsage?.cost(in: interval) ?? 0
+            estimate.observedCostUSD += imageCost
+            estimate.equivalentValueUSD += imageCost * 100 / estimate.usedPercent
+            return estimate
         }
+    }
+
+    func imageCostHelp(for provider: ProviderScope, period: ActivityPeriod) -> String {
+        guard provider != .claude else { return "Estimated API-equivalent cost of text-model usage." }
+        return snapshot.imageGenerationUsage?.explanation(in: period.interval())
+            ?? "ImageGen output estimates are updating."
+    }
+
+    func weeklyCostHelp(for provider: ProviderScope) -> String {
+        let base = "Estimated API-equivalent tokens and value at 100% of this provider's weekly window."
+        guard provider == .codex, let usage = snapshot.imageGenerationUsage,
+              let interval = codexImageInterval else { return base }
+        return base + " " + usage.explanation(in: interval)
+            + " The image component is extrapolated using the same weekly usage percentage."
+    }
+
+    private var codexImageInterval: DateInterval? {
+        guard let reset = weeklyWindow(in: snapshot.codex)?.resetsAt,
+              let sampledAt = snapshot.codex.lastSuccessAt else { return nil }
+        let start = reset.addingTimeInterval(-7 * 24 * 60 * 60)
+        let end = min(reset, sampledAt)
+        return end > start ? DateInterval(start: start, end: end) : nil
     }
 
     private func updateClaudeWeeklyValue(
