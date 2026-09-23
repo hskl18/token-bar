@@ -10,7 +10,7 @@ A native macOS menu bar monitor for Claude Code and OpenAI Codex.
 
 ## At a glance
 
-- 🟡 Claude quota windows and local token estimates
+- 🟠 Claude quota windows and local token estimates
 - 🔵 Codex quota windows and account activity
 - ⚪ Capacity-weighted combined usage
 - 🟠 Last-known values when a provider becomes stale
@@ -18,7 +18,7 @@ A native macOS menu bar monitor for Claude Code and OpenAI Codex.
 - 🧊 Liquid Glass on macOS 26 with a Material fallback
 
 The dollar values show API-equivalent estimates, not subscription charges.
-Screenshot values are examples.
+The screenshot uses local synthetic preview data.
 
 ## Build from source
 
@@ -29,6 +29,10 @@ Install Xcode 26 or newer, then run:
 open "build/Token Bar.app"
 ```
 
+The build creates a Finder-openable app bundle.
+Opening it shows the usage panel, including when the app is already running.
+To keep a copy on the Desktop, copy `build/Token Bar.app` there in Finder and double-click it.
+
 Sign in to Claude Code, Codex CLI, or Codex Desktop before refreshing Token Bar.
 Building and running the app does not require administrator access.
 macOS may request access to the user's login Keychain for Claude usage data.
@@ -38,7 +42,7 @@ macOS may request access to the user's login Keychain for Claude usage data.
 Token Bar keeps provider quotas, local activity, and pricing as separate values.
 One provider can fail without taking down the other or erasing its last successful reading.
 
-🟡 Claude · 🔵 Codex · ⚪ available · 🔴 gauge center · 🟠 stale
+🟠 Claude · 🔵 Codex · ⚪ available and All · 🟡 gauge center · 🟠 stale
 
 Read the technical notes in [`docs/`](docs/README.md):
 
@@ -47,6 +51,7 @@ Read the technical notes in [`docs/`](docs/README.md):
 - [Architecture and performance](docs/ARCHITECTURE.md)
 - [Local development](docs/DEVELOPMENT.md)
 - [Design system](docs/DESIGN.md)
+- [Subscription preview gallery](docs/SUBSCRIPTION-PREVIEWS.md)
 - [Signed distribution](docs/DISTRIBUTION.md)
 
 ## License

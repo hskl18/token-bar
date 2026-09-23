@@ -7,7 +7,7 @@ private enum Palette {
     static let track = Color(nsColor: .separatorColor)
     static let surface = Color(nsColor: .controlBackgroundColor)
     static let separator = Color(nsColor: .separatorColor)
-    static let claude = Color(red: 1, green: 0xD8 / 255, blue: 0x87 / 255)
+    static let claude = Color(red: 0xD7 / 255, green: 0x77 / 255, blue: 0x57 / 255)
     static let codex = Color(red: 0x60 / 255, green: 0xAF / 255, blue: 1)
     static let warning = Color(red: 0xF0 / 255, green: 0xA3 / 255, blue: 0x3A / 255)
 }
@@ -125,10 +125,10 @@ private struct UnifiedUsagePage: View {
         var items: [NamedWindow] = []
         if presentation.showsClaude {
             if let window = store.snapshot.claude.shortWindow {
-                items.append(NamedWindow(provider: "Claude", color: Palette.claude, window: window))
+                items.append(NamedWindow(provider: "Claude", window: window, barBase: QuotaBarColor.claude))
             }
             if let window = store.snapshot.claude.longWindow {
-                items.append(NamedWindow(provider: "Claude", color: Palette.claude, window: window))
+                items.append(NamedWindow(provider: "Claude", window: window, barBase: QuotaBarColor.claude))
             }
         }
         if presentation.showsCodex {
@@ -144,7 +144,7 @@ private struct UnifiedUsagePage: View {
             }
             for window in groupedWindows {
                 let provider = window.quotaDisplayName
-                items.append(NamedWindow(provider: provider, color: Palette.codex, window: window))
+                items.append(NamedWindow(provider: provider, window: window, barBase: QuotaBarColor.codex))
             }
         }
         return items
@@ -179,7 +179,7 @@ private struct UnifiedUsagePage: View {
                             WindowRow(
                                 name: "\(item.provider) · \(compactWindowLabel(item.window.label))",
                                 window: item.window,
-                                color: item.color
+                                barBase: item.barBase
                             )
                             if index < namedWindows.count - 1 {
                                 Divider().opacity(0.55)
@@ -233,6 +233,7 @@ private struct UsageActivityGroup: View {
                 if provider == .overview {
                     Text(provider.title)
                         .font(.system(size: TokenBarType.primary, weight: .semibold))
+                        .foregroundStyle(Palette.ink)
                         .padding(.leading, 10)
                 } else {
                     ProviderMark(provider: provider, color: color)
@@ -282,6 +283,7 @@ private struct UsageActivityGroup: View {
         Text(percent)
             .font(.system(size: TokenBarType.primary, weight: .bold, design: .rounded))
             .monospacedDigit()
+            .foregroundStyle(Palette.ink)
     }
 
     private var staleHelp: String {
@@ -308,7 +310,7 @@ private struct UsageActivityGroup: View {
 private struct WindowRow: View {
     let name: String
     let window: LimitWindow
-    let color: Color
+    let barBase: NSColor
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -338,7 +340,7 @@ private struct WindowRow: View {
     }
 
     private var progressColor: Color {
-        window.usedPercent >= 80 ? Palette.warning : color
+        Color(nsColor: QuotaBarColor.at(window.usedPercent, base: barBase))
     }
 }
 
@@ -524,7 +526,7 @@ private struct FooterBar: View {
                 footerIcon(store.isRefreshing ? "xmark" : "arrow.clockwise")
             }
             .buttonStyle(.plain)
-            .help("Auto-refreshes about every 10 minutes. Click to refresh now.")
+            .help("Auto-refreshes about every 30 minutes. Click to refresh now.")
             .accessibilityLabel(store.isRefreshing ? "Cancel refresh" : "Refresh now")
 
             Spacer()
@@ -698,8 +700,8 @@ private struct EmptyState: View {
 
 private struct NamedWindow: Identifiable {
     let provider: String
-    let color: Color
     let window: LimitWindow
+    let barBase: NSColor
 
     var id: String { provider + window.label }
 }
