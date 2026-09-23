@@ -44,6 +44,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusPanel: StatusPanelController?
     private var usageItem: NSStatusItem?
     private var refreshScheduler: NSBackgroundActivityScheduler?
+    private var activityWatcher: LocalActivityWatcher?
+    private var localRefreshTimer: Timer?
+    private var pendingLocalProviders: Set<ProviderScope> = []
+    private var lastLocalScanAt: [ProviderScope: Date] = [:]
+    private let localScanInterval: TimeInterval = 3 * 60
     private var cancellables: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -55,7 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         statusPanel?.onOpen = { [weak self] in self?.store.refreshIfStale() }
 
-        usageItem = makeStatusItem(toolTip: "Yellow: Claude · Blue: Codex · White: available")
+        usageItem = makeStatusItem(toolTip: "Red: Claude · Blue: Codex · White: available")
 
         store.$snapshot
             .sink { [weak self] snapshot in
@@ -69,20 +74,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateStatusItems()
         store.start()
 
-        if PreviewScenario.current() != nil {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard let self,
-                      let item = self.usageItem
-                else { return }
-                self.statusPanel?.show(relativeTo: item)
+        if PreviewScenario.current() == nil {
+            activityWatcher = LocalActivityWatcher { [weak self] providers in
+                self?.localActivityChanged(providers)
             }
+            activityWatcher?.start()
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.showStatusPanel()
         }
 
         let scheduler = NSBackgroundActivityScheduler(
             identifier: "com.local.tokenbar.usage-refresh"
         )
         scheduler.repeats = true
-        scheduler.interval = 10 * 60
+        scheduler.interval = 30 * 60
         scheduler.tolerance = 60
         scheduler.qualityOfService = .background
         scheduler.schedule { [weak self] completion in
@@ -96,7 +103,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         refreshScheduler?.invalidate()
+        localRefreshTimer?.invalidate()
+        activityWatcher?.stop()
         statusPanel?.hide()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        DispatchQueue.main.async { [weak self] in self?.showStatusPanel() }
+        return false
+    }
+
+    private func showStatusPanel() {
+        guard let usageItem else { return }
+        statusPanel?.show(relativeTo: usageItem)
+    }
+
+    private func localActivityChanged(_ providers: Set<ProviderScope>) {
+        pendingLocalProviders.formUnion(providers)
+        let now = Date()
+        let next = providers.map {
+            max(now.addingTimeInterval(20),
+                lastLocalScanAt[$0]?.addingTimeInterval(localScanInterval) ?? .distantPast)
+        }.min() ?? now
+        scheduleLocalRefresh(after: max(0, next.timeIntervalSince(now)))
+    }
+
+    private func scheduleLocalRefresh(after seconds: TimeInterval) {
+        let date = Date().addingTimeInterval(seconds)
+        if let timer = localRefreshTimer {
+            guard timer.fireDate > date else { return }
+            timer.invalidate()
+        }
+        localRefreshTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) {
+            [weak self] _ in
+            Task { @MainActor in self?.runLocalRefresh() }
+        }
+    }
+
+    private func runLocalRefresh() {
+        localRefreshTimer = nil
+        guard !pendingLocalProviders.isEmpty else { return }
+        guard !store.isRefreshing else {
+            scheduleLocalRefresh(after: 5)
+            return
+        }
+        let now = Date()
+        let ready = Set(pendingLocalProviders.filter {
+            now >= (lastLocalScanAt[$0]?.addingTimeInterval(localScanInterval) ?? .distantPast)
+        })
+        guard !ready.isEmpty else {
+            scheduleNextPendingLocalRefresh()
+            return
+        }
+        let attempted = store.refresh(
+            force: false,
+            providers: ready,
+            scanLocal: true
+        )
+        for provider in ready { lastLocalScanAt[provider] = now }
+        pendingLocalProviders.subtract(attempted)
+        scheduleNextPendingLocalRefresh()
+    }
+
+    private func scheduleNextPendingLocalRefresh() {
+        guard !pendingLocalProviders.isEmpty else { return }
+        let next = pendingLocalProviders.map {
+            max(store.nextAttemptDate(for: $0),
+                lastLocalScanAt[$0]?.addingTimeInterval(localScanInterval) ?? .distantPast)
+        }.min() ?? Date()
+        scheduleLocalRefresh(after: max(5, next.timeIntervalSinceNow))
     }
 
     private func makeStatusItem(toolTip: String) -> NSStatusItem {
@@ -112,12 +187,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let codexPercent = mostConstrainedPercent(store.snapshot.codex)
         switch store.snapshot.presentation {
         case .claudeOnly:
-            usageItem?.button?.image = singleGaugeImage(percent: claudePercent, color: gaugeClaude)
+            usageItem?.button?.image = singleGaugeImage(percent: claudePercent, color: QuotaBarColor.claude)
             usageItem?.button?.setAccessibilityLabel(
                 "Claude usage gauge, \(accessibilityPercent(claudePercent))."
             )
         case .codexOnly:
-            usageItem?.button?.image = singleGaugeImage(percent: codexPercent, color: gaugeCodex)
+            usageItem?.button?.image = singleGaugeImage(percent: codexPercent, color: QuotaBarColor.codex)
             usageItem?.button?.setAccessibilityLabel(
                 "Codex usage gauge, \(accessibilityPercent(codexPercent))."
             )
@@ -127,18 +202,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 rightPercent: codexPercent
             )
             usageItem?.button?.setAccessibilityLabel(
-                "Split usage gauge. Yellow, \(accessibilityPercent(claudePercent)) Claude. "
+                "Split usage gauge. Red, \(accessibilityPercent(claudePercent)) Claude. "
                     + "Blue, \(accessibilityPercent(codexPercent)) Codex. White shows available quota."
             )
         }
-    }
-
-    private var gaugeClaude: NSColor {
-        NSColor(srgbRed: 1, green: 0xD8 / 255, blue: 0x87 / 255, alpha: 1)
-    }
-
-    private var gaugeCodex: NSColor {
-        NSColor(srgbRed: 0x60 / 255, green: 0xAF / 255, blue: 1, alpha: 1)
     }
 
     private func mostConstrainedPercent(_ snapshot: ProviderSnapshot) -> Double? {
@@ -165,14 +232,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 startAngle: 110 + rotationAngle,
                 endAngle: 250 + rotationAngle,
                 percent: leftPercent,
-                progressColor: gaugeClaude
+                baseColor: QuotaBarColor.claude
             )
             drawGaugeArc(
                 center: center,
-                startAngle: 70 + rotationAngle,
-                endAngle: -70 + rotationAngle,
+                startAngle: -70 + rotationAngle,
+                endAngle: 70 + rotationAngle,
                 percent: rightPercent,
-                progressColor: gaugeCodex
+                baseColor: QuotaBarColor.codex
             )
             return true
         }
@@ -192,7 +259,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 startAngle: 75,
                 endAngle: 355,
                 percent: percent,
-                progressColor: color
+                baseColor: color
             )
             return true
         }
@@ -204,7 +271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let centerCircle = NSBezierPath(
             ovalIn: NSRect(x: center.x - 4.5, y: center.y - 4.5, width: 9, height: 9)
         )
-        NSColor(srgbRed: 0xFF / 255, green: 0x5F / 255, blue: 0x5F / 255, alpha: 1)
+        NSColor(srgbRed: 0xFF / 255, green: 0xD2 / 255, blue: 0x1F / 255, alpha: 1)
             .setFill()
         centerCircle.fill()
     }
@@ -214,7 +281,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startAngle: CGFloat,
         endAngle: CGFloat,
         percent: Double?,
-        progressColor: NSColor
+        baseColor: NSColor
     ) {
         let track = gaugeArcPath(
             center: center,
@@ -245,7 +312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         progress.lineWidth = 3
         progress.lineCapStyle = .round
-        progressColor.setStroke()
+        QuotaBarColor.at(clampedPercent, base: baseColor).setStroke()
         progress.stroke()
     }
 

@@ -52,17 +52,20 @@ The app hides dollars when a usable same-period mix is absent.
 ## Weekly capacity
 
 ```text
-current implied capacity = observed tokens × 100 / official weekly percent
-weekly value = estimated weekly capacity × current-window USD per token
+current implied capacity = current-window observed tokens × 100 / official weekly percent
+Codex weekly value = current-window estimated cost × 100 / official weekly percent
 ```
 
-Current-window observations become eligible at 3% used.
-Earlier windows with at least 10% usage can supply same-source priors.
-Token Bar retains 12 samples for 70 days, removes large median-absolute-deviation outliers, and blends the robust prior with the current observation in log space.
-Observations from the same quota bucket and source with start and reset times less than two seconds apart count as one window, retaining its latest sample, including when loading older history.
-When the account counter has not increased in a new window, a prior capacity can still be priced using the current local model mix, so the dollar projection can change before a current account sample is available.
+Codex extrapolates only current-window observations after 3% weekly usage.
+It does not multiply a previous window's token capacity by the current model mix; quota consumption can change when the model mix changes.
+If the account counter has not increased or still trails a complete local weekly ledger, Codex uses that local ledger.
+The estimate stays unavailable without a current-window sample or priced model mix, instead of preserving a stale dollar amount.
 
 Claude uses available local records inside the official 7-day interval.
+Its current-window observations become eligible at 3% used.
+Earlier windows with at least 10% usage can supply same-source priors.
+Token Bar retains 12 Claude samples for 70 days, removes large median-absolute-deviation outliers, and blends the robust prior with the current observation in log space.
+Observations from the same quota bucket and source with start and reset times less than two seconds apart count as one window, retaining its latest sample, including when loading older history.
 Another computer can raise the Claude percentage without adding records on this Mac.
 
 Codex uses:
@@ -73,7 +76,8 @@ current lifetimeTokens - recorded near-start lifetimeTokens
 
 The difference can include another computer on the same account.
 Until Token Bar accepts an account baseline, it uses the available local Codex 7-day ledger as a fallback.
-Account-wide and local-only samples keep separate histories.
+The account-wide projection uses this Mac's current-window model mix to price account tokens.
+The local fallback requires an exact token match between the ledger and its price mix.
 
 ## ImageGen output estimates
 
@@ -113,7 +117,7 @@ All remains unavailable until both providers have usable capacity evidence.
 - Account counters, local records and quota percentages may differ in scope and update timing; the near-start baseline can omit initial usage.
 - Applying a local price mix to account totals assumes representative models and token categories, with matching calendar dates.
 - Completed local scans do not establish whole-account coverage; Codex scans `sessions`, not archives or other hosts.
-- Preserved estimates can outlive their quota state; a falling projection alone does not prove a quota reduction or poor image value.
+- A falling projection alone does not prove a quota reduction or poor image value.
 - Claude cleanup can remove old local sessions.
 - Remote Codex usage lacks a remote model and category breakdown.
 - Internal model labels without a documented price remain unpriced.

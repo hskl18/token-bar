@@ -18,7 +18,7 @@ Official prices + fallback ─ PriceCatalog ─ CostLedger ──┘
 `ProviderSnapshot` contains official percentages, reset times, connection state, cooldowns, and freshness.
 `TokenActivity` contains calendar token totals.
 `CostLedger` contains day-specific local model and token-category prices.
-`WeeklyCapacityHistory` contains a bounded set of derived 7-day capacity observations.
+Claude's `WeeklyCapacityHistory` contains a bounded set of derived 7-day capacity observations.
 `ImageGenerationUsage` contains saved-file-based estimates, separate from provider token activity.
 
 These values remain separate because an official quota percentage is not a token counter and an API-equivalent dollar estimate is not a bill.
@@ -37,6 +37,11 @@ Provider headers and combined capacity continue to use the weekly percentage.
 
 The status item owns a native `NSMenu` containing the SwiftUI view.
 AppKit handles menu tracking and dismissal, and the app refreshes stale data when the menu opens.
+Opening the menu does not synchronously read Keychain; a stale Claude credential may be read by the background refresh.
+FSEvents watches local Claude and Codex session directories plus saved Codex images.
+Relevant changes are coalesced for 20 seconds, and event-triggered local scans run at most once per provider every three minutes.
+Only the changed provider is scanned; account requests retain the three-minute freshness limit and Claude rate-limit cooldown.
+A 30-minute background refresh covers quota resets, remote devices, and missed file events; the refresh button remains immediate.
 The root SwiftUI view leaves the outer background to the native menu to avoid stacked glass borders.
 
 ## Transcript parsing
@@ -79,7 +84,7 @@ Launch migration imports only the reusable snapshot from QuotaBar Lite and remov
 The original legacy application domain is left untouched.
 
 Unchanged refreshes seek directly to saved byte offsets.
-The ImageGen sampler uses the existing refresh cadence, reads PNG headers/end markers and caches records by generation ID without decoding pixels.
+The ImageGen sampler runs for Codex activity and fallback refreshes, reads PNG headers/end markers and caches records by generation ID without decoding pixels.
 A truncated or removed source file invalidates the affected local ledger and triggers a deterministic rebuild instead of applying deltas to the wrong history.
 
 An August 30, 2026 arm64 release build measured 1.8 MB on an M3 Pro MacBook Pro.

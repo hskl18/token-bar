@@ -278,7 +278,7 @@ struct PriceCatalog {
             "base input tokens",
             "5m cache writes",
             "1h cache writes",
-            "cache hits & refreshes",
+            "cache hits and refreshes",
             "output tokens"
         ]
         guard rows.count > 1,
@@ -315,6 +315,7 @@ struct PriceCatalog {
 
     private func normalizedHeader(_ value: String) -> String {
         value.lowercased()
+            .replacingOccurrences(of: " & ", with: " and ")
             .split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
     }

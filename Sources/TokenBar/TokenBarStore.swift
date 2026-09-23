@@ -40,22 +40,29 @@ final class TokenBarStore: ObservableObject {
         refresh(force: false)
     }
 
-    func refresh(force: Bool = true) {
-        guard previewScenario == nil else { return }
-        guard !isRefreshing else { return }
+    @discardableResult
+    func refresh(
+        force: Bool = true,
+        providers: Set<ProviderScope>? = nil,
+        scanLocal: Bool = false
+    ) -> Set<ProviderScope> {
+        guard previewScenario == nil, !isRefreshing else { return [] }
 
         let attemptedAt = Date()
-        let shouldRefreshCodex = shouldAttempt(snapshot.codex, force: force, at: attemptedAt)
-        let claudeCredentialChanged = ClaudeClient.credentialWasModified(
-            after: snapshot.claude.lastAttemptAt
-        )
-        let shouldRefreshClaude = shouldAttempt(
-            snapshot.claude,
-            force: force,
-            at: attemptedAt,
-            externalStateChanged: claudeCredentialChanged
-        )
-        guard shouldRefreshCodex || shouldRefreshClaude else { return }
+        let scanCodex = providers?.contains(.codex) ?? true
+        let scanClaude = providers?.contains(.claude) ?? true
+        let shouldRefreshCodex = scanCodex
+            && shouldAttempt(snapshot.codex, force: force, at: attemptedAt)
+        // Keychain reads belong in the background fetch, not the menu-open callback.
+        let shouldRefreshClaude = scanClaude
+            && shouldAttempt(snapshot.claude, force: force, at: attemptedAt)
+        let shouldScanCodex = scanCodex && (scanLocal || shouldRefreshCodex)
+        let shouldScanClaude = scanClaude && (scanLocal || shouldRefreshClaude)
+        guard shouldScanCodex || shouldScanClaude else { return [] }
+
+        var attempted: Set<ProviderScope> = []
+        if shouldRefreshCodex { attempted.insert(.codex) }
+        if shouldRefreshClaude { attempted.insert(.claude) }
 
         if shouldRefreshCodex { snapshot.codex.lastAttemptAt = attemptedAt }
         if shouldRefreshClaude { snapshot.claude.lastAttemptAt = attemptedAt }
@@ -78,9 +85,12 @@ final class TokenBarStore: ObservableObject {
             async let claudeResult: Result<ProviderSnapshot, Error>? = shouldRefreshClaude
                 ? capture { try await ClaudeClient().fetch() }
                 : nil
-            async let claudeLedgerResult = ClaudeMixSampler().update()
-            async let codexUsageLedgerResult = CodexMixSampler().update()
-            async let imageUsageResult = ImageGenerationSampler().update()
+            async let claudeLedgerResult: ClaudeUsageLedger? = shouldScanClaude
+                ? ClaudeMixSampler().update() : nil
+            async let codexUsageLedgerResult: CodexUsageLedger? = shouldScanCodex
+                ? CodexMixSampler().update() : nil
+            async let imageUsageResult: ImageGenerationUsage? = shouldScanCodex
+                ? ImageGenerationSampler().update() : nil
 
             let (codex, claude, claudeLedger, codexUsageLedger, imageUsage) = await (
                 codexResult,
@@ -90,7 +100,7 @@ final class TokenBarStore: ObservableObject {
                 imageUsageResult
             )
             guard !Task.isCancelled, refreshGeneration == generation else { return }
-            snapshot.imageGenerationUsage = imageUsage
+            if let imageUsage { snapshot.imageGenerationUsage = imageUsage }
 
             var officialCodexActivity: TokenActivity?
             var codexSucceeded = false
@@ -166,8 +176,6 @@ final class TokenBarStore: ObservableObject {
                 }
             }
 
-            let claudeMixLedger = mixLedger(from: claudeLedger)
-            let codexCalendarLedger = codexUsageLedger.mixLedger
             let codexWindowLedger: CodexWindowLedger? = {
                 guard case let .success(ledger)? = codexWindowResult else { return nil }
                 return ledger
@@ -176,33 +184,52 @@ final class TokenBarStore: ObservableObject {
                 guard case let .success(ledger)? = claudeWindowResult else { return nil }
                 return ledger
             }()
+            let codexCalendarLedger = codexUsageLedger?.mixLedger ?? .empty
             let codexLedger: MixLedger = {
+                guard codexUsageLedger != nil else { return .empty }
                 if let codexWindowLedger, codexWindowLedger.observedTokens > 0 {
                     return codexWindowLedger.mixLedger
                 }
                 return CodexWindowSampler().lastKnownMixLedger() ?? .empty
             }()
-            let claudeWindowLedgerForPricing = claudeWindowLedger?.mixLedger ?? .empty
+            let claudeMixLedger = claudeLedger.map(mixLedger(from:)) ?? .empty
             let catalog = PriceCatalog()
-            _ = await catalog.costMix(
-                for: mergedLedger(mergedLedger(codexCalendarLedger, codexLedger), claudeMixLedger)
-            )
-            let codexMix = await catalog.costMix(for: codexLedger)
-            let codexCostLedger = await catalog.costLedger(for: codexCalendarLedger)
-            let claudeCostLedger = await catalog.costLedger(for: claudeMixLedger)
-            let claudeWindowMix = await catalog.costMix(for: claudeWindowLedgerForPricing)
-            guard !Task.isCancelled, refreshGeneration == generation else { return }
-
-            if !codexLedger.byModel.isEmpty {
-                snapshot.costMix = codexMix
+            _ = await catalog.costMix(for: mergedLedger(
+                mergedLedger(codexCalendarLedger, codexLedger), claudeMixLedger
+            ))
+            if codexUsageLedger != nil {
+                let codexMix = await catalog.costMix(for: codexLedger)
+                let codexCostLedger = await catalog.costLedger(for: codexCalendarLedger)
+                guard !Task.isCancelled, refreshGeneration == generation else { return }
+                if !codexLedger.byModel.isEmpty { snapshot.costMix = codexMix }
+                if !codexCostLedger.byDay.isEmpty { snapshot.codexCostLedger = codexCostLedger }
+                if codexSucceeded {
+                    let codexWeeklyMix = (codexWindowLedger?.observedTokens ?? 0) > 0
+                        ? codexMix : .empty
+                    updateCodexAccountEstimates(
+                        activity: officialCodexActivity,
+                        costMix: codexWeeklyMix,
+                        localResult: codexWindowResult,
+                        localLedger: codexWindowLedger,
+                        observedAt: attemptedAt
+                    )
+                }
             }
-            snapshot.claudeTokenActivity = tokenActivity(from: claudeLedger)
-            snapshot.claudeCostMix = claudeCostLedger.overall
-            if !claudeCostLedger.byDay.isEmpty {
-                snapshot.claudeCostLedger = claudeCostLedger
-            }
-            if !codexCostLedger.byDay.isEmpty {
-                snapshot.codexCostLedger = codexCostLedger
+            if let claudeLedger {
+                let claudeWindowLedgerForPricing = claudeWindowLedger?.mixLedger ?? .empty
+                let claudeCostLedger = await catalog.costLedger(for: claudeMixLedger)
+                let claudeWindowMix = await catalog.costMix(for: claudeWindowLedgerForPricing)
+                guard !Task.isCancelled, refreshGeneration == generation else { return }
+                snapshot.claudeTokenActivity = tokenActivity(from: claudeLedger)
+                snapshot.claudeCostMix = claudeCostLedger.overall
+                if !claudeCostLedger.byDay.isEmpty {
+                    snapshot.claudeCostLedger = claudeCostLedger
+                }
+                updateClaudeWeeklyValue(
+                    result: claudeWindowResult,
+                    ledger: claudeWindowLedger,
+                    costMix: claudeWindowMix
+                )
             }
             if let officialCodexActivity {
                 let merged = mergedCodexActivity(
@@ -212,26 +239,12 @@ final class TokenBarStore: ObservableObject {
                 snapshot.tokenActivity = merged.activity
                 snapshot.codexTodayIsLocalEstimate = merged.usesLocalToday
             }
-            if codexSucceeded {
-                updateCodexAccountEstimates(
-                    activity: officialCodexActivity,
-                    costMix: codexMix,
-                    localResult: codexWindowResult,
-                    localLedger: codexWindowLedger,
-                    observedAt: attemptedAt
-                )
-            }
-            updateClaudeWeeklyValue(
-                result: claudeWindowResult,
-                ledger: claudeWindowLedger,
-                costMix: claudeWindowMix
-            )
-
             snapshot.updatedAt = [snapshot.claude.lastSuccessAt, snapshot.codex.lastSuccessAt]
                 .compactMap { $0 }
                 .max()
             saveSnapshot()
         }
+        return attempted
     }
 
     func cancelRefresh() {
@@ -240,6 +253,13 @@ final class TokenBarStore: ObservableObject {
         refreshTask?.cancel()
         refreshTask = nil
         isRefreshing = false
+    }
+
+    func nextAttemptDate(for scope: ProviderScope) -> Date {
+        let provider = scope == .claude ? snapshot.claude : snapshot.codex
+        let freshnessDate = (provider.lastAttemptAt ?? provider.lastSuccessAt)?
+            .addingTimeInterval(freshnessInterval) ?? .distantPast
+        return max(freshnessDate, provider.nextAllowedRefreshAt ?? .distantPast)
     }
 
     func lastSuccessDate(for provider: ProviderScope) -> Date? {
@@ -310,7 +330,9 @@ final class TokenBarStore: ObservableObject {
     }
 
     func weeklyCostHelp(for provider: ProviderScope) -> String {
-        let base = "Estimated API-equivalent tokens and value at 100% of this provider's weekly window."
+        let base = provider == .codex
+            ? "Current-window API-equivalent tokens and value extrapolated to 100% of Codex weekly usage."
+            : "Estimated API-equivalent tokens and value at 100% of this provider's weekly window."
         guard provider == .codex, let usage = snapshot.imageGenerationUsage,
               let interval = codexImageInterval else { return base }
         return base + " " + usage.explanation(in: interval)
@@ -390,13 +412,13 @@ final class TokenBarStore: ObservableObject {
         localLedger: CodexWindowLedger?,
         observedAt: Date
     ) {
+        snapshot.codexWeeklyCapacity = nil
+        snapshot.codexWeeklyValue = nil
+        snapshot.codexWeeklyEstimateSource = nil
         guard let window = weeklyWindow(in: snapshot.codex),
               let durationMinutes = window.windowMinutes,
               let resetsAt = window.resetsAt
         else {
-            snapshot.codexWeeklyCapacity = nil
-            snapshot.codexWeeklyValue = nil
-            snapshot.codexWeeklyEstimateSource = nil
             snapshot.codexWeeklyValueError = "Weekly usage is unavailable."
             return
         }
@@ -447,15 +469,17 @@ final class TokenBarStore: ObservableObject {
         }
 
         let observedTokens = lifetimeTokens - baseline.lifetimeTokens
-        var history = snapshot.codexWeeklyCapacityHistory ?? .empty
-        let capacity = WeeklyCapacityEstimator.update(
-            history: &history,
-            window: window,
-            observedTokens: observedTokens,
-            observedAt: observedAt,
-            source: CodexWeeklyEstimateSource.accountLifetime.rawValue
-        )
-        snapshot.codexWeeklyCapacityHistory = history
+        let localObservedTokens = localLedger?.isComplete == true && localLedger?.parseErrors == 0
+            ? localLedger?.observedTokens ?? 0 : 0
+        guard observedTokens > 0, observedTokens >= localObservedTokens else {
+            updateCodexLocalFallback(
+                result: localResult,
+                ledger: localLedger,
+                costMix: costMix
+            )
+            return
+        }
+        let capacity = currentCodexCapacity(window: window, observedTokens: observedTokens)
         if let capacity {
             snapshot.codexWeeklyCapacity = capacity
             snapshot.codexWeeklyEstimateSource = .accountLifetime
@@ -506,15 +530,7 @@ final class TokenBarStore: ObservableObject {
             return
         }
 
-        var history = snapshot.codexWeeklyCapacityHistory ?? .empty
-        let capacity = WeeklyCapacityEstimator.update(
-            history: &history,
-            window: window,
-            observedTokens: ledger.observedTokens,
-            observedAt: ledger.observedAt,
-            source: CodexWeeklyEstimateSource.localWindowFallback.rawValue
-        )
-        snapshot.codexWeeklyCapacityHistory = history
+        let capacity = currentCodexCapacity(window: window, observedTokens: ledger.observedTokens)
         if let capacity {
             snapshot.codexWeeklyCapacity = capacity
             snapshot.codexWeeklyEstimateSource = .localWindowFallback
@@ -572,6 +588,23 @@ final class TokenBarStore: ObservableObject {
         }
     }
 
+    private func currentCodexCapacity(
+        window: LimitWindow,
+        observedTokens: Int64
+    ) -> WeeklyTokenCapacityEstimate? {
+        guard observedTokens > 0,
+              window.usedPercent.isFinite,
+              window.usedPercent >= 3
+        else { return nil }
+        let equivalentTokens = Double(observedTokens) * 100 / window.usedPercent
+        guard equivalentTokens.isFinite, equivalentTokens > 0 else { return nil }
+        return WeeklyTokenCapacityEstimate(
+            usedPercent: window.usedPercent,
+            observedTokens: observedTokens,
+            equivalentTokens: equivalentTokens
+        )
+    }
+
     private func weeklyValueEstimate(
         capacity: WeeklyTokenCapacityEstimate?,
         observedTokens: Int64,
@@ -579,7 +612,7 @@ final class TokenBarStore: ObservableObject {
         requiresExactTokenMatch: Bool
     ) -> WeeklyValueStatus {
         guard let capacity else {
-            return .unavailable("Waiting for enough current or prior weekly observations.")
+            return .unavailable("Waiting for enough weekly observations.")
         }
         guard costMix.missingModels.isEmpty,
               (!requiresExactTokenMatch || costMix.sampledTokens == observedTokens),
@@ -615,12 +648,8 @@ final class TokenBarStore: ObservableObject {
     private func shouldAttempt(
         _ provider: ProviderSnapshot,
         force: Bool,
-        at date: Date,
-        externalStateChanged: Bool = false
+        at date: Date
     ) -> Bool {
-        if externalStateChanged {
-            return true
-        }
         if let nextAllowed = provider.nextAllowedRefreshAt, nextAllowed > date {
             return false
         }
@@ -701,10 +730,12 @@ final class TokenBarStore: ObservableObject {
     }
 
     private func migrateCodexWeeklyEstimate() {
-        guard snapshot.codexWeeklyEstimateVersion != 3 else { return }
-        snapshot.codexWeeklyEstimateVersion = 3
+        guard snapshot.codexWeeklyEstimateVersion != 4 else { return }
+        snapshot.codexWeeklyEstimateVersion = 4
         snapshot.claudeWeeklyCapacityHistory = snapshot.claudeWeeklyCapacityHistory ?? .empty
-        snapshot.codexWeeklyCapacityHistory = snapshot.codexWeeklyCapacityHistory ?? .empty
+        snapshot.codexWeeklyCapacity = nil
+        snapshot.codexWeeklyValue = nil
+        snapshot.codexWeeklyEstimateSource = nil
         saveSnapshot()
     }
 

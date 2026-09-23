@@ -17,6 +17,8 @@ Codex CLI and Codex Desktop are alternate runtimes for one Codex account, so Tok
 open "build/Token Bar.app"
 ```
 
+The app bundle can also be opened directly in Finder; opening it again shows the menu panel.
+
 The script builds the current Mac architecture and applies an ad-hoc signature.
 The build and launch steps do not require administrator access.
 

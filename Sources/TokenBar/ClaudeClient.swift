@@ -30,15 +30,6 @@ enum ClaudeClientError: LocalizedError {
 }
 
 struct ClaudeClient {
-    static func credentialWasModified(after date: Date?) -> Bool {
-        guard let date,
-              let modifiedAt = try? readClaudeKeychainCredential().modifiedAt
-        else {
-            return false
-        }
-        return modifiedAt > date
-    }
-
     func fetch() async throws -> ProviderSnapshot {
         let initialToken = try await Task.detached(priority: .utility) {
             try readClaudeToken(allowEnvironment: true)
@@ -141,15 +132,10 @@ private func readClaudeToken(allowEnvironment: Bool) throws -> String {
         return token
     }
 
-    return try readClaudeKeychainCredential().accessToken
+    return try readClaudeKeychainCredential()
 }
 
-private struct ClaudeKeychainCredential {
-    let accessToken: String
-    let modifiedAt: Date
-}
-
-private func readClaudeKeychainCredential() throws -> ClaudeKeychainCredential {
+private func readClaudeKeychainCredential() throws -> String {
     let username = NSUserName()
     let credentialNames = [
         "Claude Code-credentials",
@@ -178,13 +164,12 @@ private func readClaudeKeychainCredential() throws -> ClaudeKeychainCredential {
             let root = object as? [String: Any],
             let oauth = root["claudeAiOauth"] as? [String: Any],
             let token = oauth["accessToken"] as? String,
-            !token.isEmpty,
-            let modifiedAt = parseKeychainModificationDate(metadata.output)
+            !token.isEmpty
         else {
             foundUnreadableCredential = true
             continue
         }
-        return ClaudeKeychainCredential(accessToken: token, modifiedAt: modifiedAt)
+        return token
     }
 
     if foundUnreadableCredential {
@@ -207,27 +192,6 @@ private func runSecurity(_ arguments: [String]) -> (status: Int32, output: Data)
     let errorData = errors.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
     return (process.terminationStatus, outputData + errorData)
-}
-
-private func parseKeychainModificationDate(_ data: Data) -> Date? {
-    guard let output = String(data: data, encoding: .utf8),
-          let range = output.range(
-            of: #""mdat"[^\n]*"([0-9]{14}Z)"#,
-            options: .regularExpression
-          )
-    else {
-        return nil
-    }
-    let line = String(output[range])
-    guard let dateRange = line.range(of: #"[0-9]{14}Z"#, options: .regularExpression) else {
-        return nil
-    }
-    let formatter = DateFormatter()
-    formatter.calendar = Calendar(identifier: .gregorian)
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.timeZone = TimeZone(secondsFromGMT: 0)
-    formatter.dateFormat = "yyyyMMddHHmmss'Z'"
-    return formatter.date(from: String(line[dateRange]))
 }
 
 private func parseClaudeWindow(_ raw: Any?, label: String, minutes: Int) -> LimitWindow? {

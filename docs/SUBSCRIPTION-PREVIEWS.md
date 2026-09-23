@@ -1,6 +1,6 @@
 # Subscription preview gallery
 
-Captured on September 6, 2026 from the local macOS app using `TOKENBAR_PREVIEW_STATE`.
+Captured on September 23, 2026 from the local macOS app using `TOKENBAR_PREVIEW_STATE`.
 These screenshots show synthetic usage data in the actual menu UI.
 The dollar values represent fixture cost estimates, not subscription prices, bills, or guaranteed included value.
 

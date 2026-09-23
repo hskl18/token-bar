@@ -1,6 +1,6 @@
 import Foundation
 
-enum ProviderScope: String, CaseIterable, Identifiable {
+enum ProviderScope: String, CaseIterable, Identifiable, Hashable {
     case overview
     case claude
     case codex
@@ -393,7 +393,6 @@ struct AppSnapshot: Codable, Hashable {
     var claudeWeeklyCapacity: WeeklyTokenCapacityEstimate?
     var codexWeeklyCapacity: WeeklyTokenCapacityEstimate?
     var claudeWeeklyCapacityHistory: WeeklyCapacityHistory?
-    var codexWeeklyCapacityHistory: WeeklyCapacityHistory?
     var claudeWeeklyValue: WeeklyValueEstimate?
     var claudeWeeklyValueError: String?
     var codexWeeklyValue: WeeklyValueEstimate?
@@ -419,14 +418,13 @@ struct AppSnapshot: Codable, Hashable {
         claudeWeeklyCapacity: nil,
         codexWeeklyCapacity: nil,
         claudeWeeklyCapacityHistory: nil,
-        codexWeeklyCapacityHistory: nil,
         claudeWeeklyValue: nil,
         claudeWeeklyValueError: nil,
         codexWeeklyValue: nil,
         codexWeeklyValueError: nil,
         codexWeeklyEstimateSource: nil,
         codexAccountWindowBaselines: [],
-        codexWeeklyEstimateVersion: 3,
+        codexWeeklyEstimateVersion: 4,
         codexActivityError: nil,
         codexActivityLastSuccessAt: nil,
         codexTodayIsLocalEstimate: nil,
