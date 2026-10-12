@@ -1,0 +1,39 @@
+import CryptoKit
+import Foundation
+
+enum TranscriptCache {
+    private static let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Token Bar/Ledgers", isDirectory: true)
+
+    private static func url(for key: String) -> URL {
+        guard key.hasPrefix(StorageKeys.codexWindowLedger + ".") else {
+            return directory.appendingPathComponent(key).appendingPathExtension("json")
+        }
+        let digest = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+        let name = StorageKeys.codexWindowLedger + "." + digest
+        return directory.appendingPathComponent(name).appendingPathExtension("json")
+    }
+
+    static func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
+        (try? Data(contentsOf: url(for: key))).flatMap { try? JSONDecoder().decode(type, from: $0) }
+    }
+
+    static func save<T: Encodable>(_ value: T, key: String) {
+        guard let data = try? JSONEncoder().encode(value) else { return }
+        let destination = url(for: key)
+        if data == (try? Data(contentsOf: destination)) { return }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try data.write(to: destination, options: .atomic)
+        } catch {
+            NSLog("Token Bar could not save a transcript ledger: %@", error.localizedDescription)
+        }
+    }
+
+    static func removeObsolete() {
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        for file in files where StorageKeys.isObsolete(file.deletingPathExtension().lastPathComponent) {
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
+}

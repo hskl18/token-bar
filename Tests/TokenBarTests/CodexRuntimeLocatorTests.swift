@@ -52,6 +52,24 @@ final class CodexRuntimeLocatorTests: XCTestCase {
         ])
     }
 
+    func testDesktopAppDiscoveryFindsNestedCodexCLI() {
+        let runtime = "/External/Apps/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+        let locator = CodexRuntimeLocator(
+            environment: [:],
+            homeDirectory: URL(fileURLWithPath: "/Users/test"),
+            desktopApplicationURL: URL(fileURLWithPath: "/External/Apps/ChatGPT.app"),
+            rememberedExecutable: nil,
+            isExecutable: { $0 == runtime }
+        )
+
+        XCTAssertEqual(locator.candidates(), [
+            CodexRuntimeCandidate(
+                executableURL: URL(fileURLWithPath: runtime),
+                source: .desktopApp
+            ),
+        ])
+    }
+
     func testDuplicateRuntimePathsAreProbedOnce() {
         let locator = CodexRuntimeLocator(
             environment: ["CODEX_BIN": "/tools/codex", "PATH": "/tools"],

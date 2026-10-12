@@ -2,33 +2,41 @@ import CoreServices
 import Foundation
 
 final class LocalActivityWatcher {
-    private let claudeRoot: String
-    private let codexRoot: String
-    private let imageRoot: String
-    private let claudeBase: String
-    private let codexBase: String
-    private let onChange: @MainActor (Set<ProviderScope>) -> Void
+    // A watched transcript or image root, reported as the configuration directory that owns it.
+    private struct Root {
+        let path: String
+        let owner: String
+        let suffix: String
+    }
+
+    private var roots: [Root] = []
+    private let onChange: @MainActor (Set<String>) -> Void
     private var stream: FSEventStreamRef?
 
-    init(onChange: @escaping @MainActor (Set<ProviderScope>) -> Void) {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
-            .map(URL.init(fileURLWithPath:)) ?? home.appendingPathComponent(".codex")
-        claudeBase = home.appendingPathComponent(".claude").standardizedFileURL.path
-        codexBase = codexHome.standardizedFileURL.path
-        claudeRoot = home.appendingPathComponent(".claude/projects").standardizedFileURL.path
-        codexRoot = codexHome.appendingPathComponent("sessions").standardizedFileURL.path
-        imageRoot = codexHome.appendingPathComponent("generated_images").standardizedFileURL.path
+    var watchedAccounts: Set<String> { Set(roots.map(\.owner)) }
+
+    init(onChange: @escaping @MainActor (Set<String>) -> Void) {
         self.onChange = onChange
     }
 
-    func start() {
-        guard stream == nil else { return }
-        let roots = [(claudeRoot, claudeBase), (codexRoot, codexBase),
-                     (imageRoot, codexBase)]
-            .filter { !$0.0.split(separator: "/").contains(where: { $0.lowercased() == "trash" }) }
+    /// Watches the primary directories plus each additional account, restarting any earlier stream.
+    func start(accounts: [AccountSource]) {
+        stop()
+        let codexHome = AccountSource.primaryDirectory(for: .codex)
+        let sources = [ProviderScope.claude, .codex].map {
+            AccountSource(provider: $0, directory: AccountSource.primaryDirectory(for: $0).path)
+        } + accounts
+        roots = sources.flatMap { source in
+            let names = source.provider == .claude ? ["projects"] : ["sessions", "archived_sessions"]
+            return names.map { name in
+                Root(path: source.url.appendingPathComponent(name).path,
+                     owner: source.directory, suffix: ".jsonl")
+            }
+        } + [Root(path: codexHome.appendingPathComponent("generated_images").path,
+                  owner: codexHome.path, suffix: ".png")]
+        roots.removeAll { AccountSource.isExcluded(URL(fileURLWithPath: $0.path)) }
         let paths = Array(Set(roots.compactMap { nearestExistingDirectory(
-            for: $0.0, stoppingAt: $0.1
+            for: $0.path, stoppingAt: $0.owner
         ) }))
         guard !paths.isEmpty else { return }
 
@@ -45,14 +53,14 @@ final class LocalActivityWatcher {
                 guard let info else { return }
                 let watcher = Unmanaged<LocalActivityWatcher>.fromOpaque(info).takeUnretainedValue()
                 let names = paths.assumingMemoryBound(to: UnsafePointer<CChar>.self)
-                var providers: Set<ProviderScope> = []
+                var owners: Set<String> = []
                 for index in 0..<count {
-                    providers.formUnion(watcher.providers(
+                    owners.formUnion(watcher.owners(
                         for: String(cString: names[index]), flags: flags[index]
                     ))
                 }
-                if !providers.isEmpty {
-                    Task { @MainActor in watcher.onChange(providers) }
+                if !owners.isEmpty {
+                    Task { @MainActor in watcher.onChange(owners) }
                 }
             },
             &context,
@@ -91,27 +99,17 @@ final class LocalActivityWatcher {
         return url.path
     }
 
-    private func providers(for path: String, flags: FSEventStreamEventFlags) -> Set<ProviderScope> {
+    private func owners(for path: String, flags: FSEventStreamEventFlags) -> Set<String> {
         let isDirectory = flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir) != 0
         let needsRescan = flags & FSEventStreamEventFlags(
             kFSEventStreamEventFlagMustScanSubDirs
                 | kFSEventStreamEventFlagUserDropped
                 | kFSEventStreamEventFlagKernelDropped
         ) != 0
-        var result: Set<ProviderScope> = []
-        if matches(path, root: claudeRoot),
-           isDirectory || needsRescan || path.hasSuffix(".jsonl") {
-            result.insert(.claude)
+        let relevant = { (root: Root) in
+            isDirectory || needsRescan || path.lowercased().hasSuffix(root.suffix)
         }
-        if matches(path, root: codexRoot),
-           isDirectory || needsRescan || path.hasSuffix(".jsonl") {
-            result.insert(.codex)
-        }
-        if matches(path, root: imageRoot),
-           isDirectory || needsRescan || path.lowercased().hasSuffix(".png") {
-            result.insert(.codex)
-        }
-        return result
+        return Set(roots.filter { matches(path, root: $0.path) && relevant($0) }.map(\.owner))
     }
 
     private func matches(_ path: String, root: String) -> Bool {

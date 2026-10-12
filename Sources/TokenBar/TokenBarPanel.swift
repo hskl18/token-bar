@@ -10,9 +10,12 @@ private enum Palette {
     static let claude = Color(red: 0xD7 / 255, green: 0x77 / 255, blue: 0x57 / 255)
     static let codex = Color(red: 0x60 / 255, green: 0xAF / 255, blue: 1)
     static let warning = Color(red: 0xF0 / 255, green: 0xA3 / 255, blue: 0x3A / 255)
+    static let failure = Color.yellow
 }
 
 private enum AppleGeometry {
+    static let pageInset: CGFloat = 14
+    static let contentInset: CGFloat = 12
     static let groupFallbackRadius: CGFloat = 14
     static let controlFallbackRadius: CGFloat = 10
 }
@@ -100,15 +103,15 @@ struct RootView: View {
     var body: some View {
         VStack(spacing: 0) {
             UnifiedUsagePage()
-                .padding(.horizontal, 14)
-                .padding(.top, 22)
+                .padding(.horizontal, AppleGeometry.pageInset)
+                .padding(.top, 8)
                 .padding(.bottom, 4)
 
             FooterBar()
         }
         .frame(
             width: TokenBarLayout.panelWidth,
-            height: TokenBarLayout.panelHeight(for: store.snapshot)
+            height: TokenBarLayout.panelSize(for: store.snapshot).height
         )
         .foregroundStyle(Palette.ink)
     }
@@ -123,16 +126,9 @@ private struct UnifiedUsagePage: View {
 
     private var namedWindows: [NamedWindow] {
         var items: [NamedWindow] = []
-        if presentation.showsClaude {
-            if let window = store.snapshot.claude.shortWindow {
-                items.append(NamedWindow(provider: "Claude", window: window, barBase: QuotaBarColor.claude))
-            }
-            if let window = store.snapshot.claude.longWindow {
-                items.append(NamedWindow(provider: "Claude", window: window, barBase: QuotaBarColor.claude))
-            }
-        }
-        if presentation.showsCodex {
-            let groupedWindows = store.snapshot.codex.displayWindows.sorted {
+        func append(title: String, source: String, name: String, quota: ProviderSnapshot, color: NSColor,
+                    showUnavailable: Bool = false) {
+            let groupedWindows = quota.displayWindows.sorted {
                 let leftBucket = $0.limitID ?? "codex"
                 let rightBucket = $1.limitID ?? "codex"
                 if leftBucket != rightBucket {
@@ -143,15 +139,53 @@ private struct UnifiedUsagePage: View {
                 return ($0.windowMinutes ?? Int.max) < ($1.windowMinutes ?? Int.max)
             }
             for window in groupedWindows {
-                let provider = window.quotaDisplayName
-                items.append(NamedWindow(provider: provider, window: window, barBase: QuotaBarColor.codex))
+                let detail = name == "Codex" && window.quotaDisplayName != "Codex" ? window.quotaDisplayName
+                    : name == "Claude" && window.windowMinutes == 10080 ? window.limitName : nil
+                let provider = detail.map { title + " · " + $0 } ?? title
+                items.append(NamedWindow(
+                    provider: provider, scope: name, source: source, window: window, barBase: color,
+                    status: nil
+                ))
+            }
+            if groupedWindows.isEmpty && showUnavailable {
+                items.append(NamedWindow(
+                    provider: title, scope: name, source: source, window: nil, barBase: color,
+                    status: store.isRefreshing ? "Connecting…" : "Quota unavailable"
+                ))
             }
         }
-        return items
+        if presentation.showsClaude {
+            append(
+                title: "Claude", source: "~/.claude", name: "Claude",
+                quota: store.snapshot.claude, color: QuotaBarColor.claude
+            )
+        }
+        for account in store.snapshot.additionalClaudeAccounts ?? [] {
+            append(
+                title: account.name, source: account.sourceDirectory,
+                name: "Claude", quota: account.quota, color: QuotaBarColor.claude, showUnavailable: true
+            )
+        }
+        if presentation.showsCodex && !store.snapshot.primaryCodexYields {
+            append(
+                title: "Codex", source: "~/.codex", name: "Codex",
+                quota: store.snapshot.codex, color: QuotaBarColor.codex
+            )
+        }
+        for account in store.snapshot.visibleCodexAccounts {
+            append(
+                title: account.name, source: account.sourceDirectory,
+                name: "Codex", quota: account.quota, color: QuotaBarColor.codex, showUnavailable: true
+            )
+        }
+        return items.filter { $0.window?.windowMinutes == 5 * 60 }
+            + items.filter { $0.window?.windowMinutes == 7 * 24 * 60 }
+            + items.filter { $0.window?.windowMinutes != 5 * 60 && $0.window?.windowMinutes != 7 * 24 * 60 }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        let windows = namedWindows
+        return VStack(alignment: .leading, spacing: 14) {
             if presentation.showsOverview {
                 UsageActivityGroup(provider: .overview)
             }
@@ -162,8 +196,7 @@ private struct UnifiedUsagePage: View {
                 UsageActivityGroup(provider: .codex)
             }
 
-            if presentation == .none {
-                ErrorSummary()
+            if presentation == .none && windows.isEmpty {
                 PanelCard {
                     EmptyState(
                         text: store.isRefreshing
@@ -172,17 +205,21 @@ private struct UnifiedUsagePage: View {
                         isLoading: store.isRefreshing
                     )
                 }
-            } else if !namedWindows.isEmpty {
-                PanelCard {
-                    VStack(spacing: 12) {
-                        ForEach(Array(namedWindows.enumerated()), id: \.element.window.id) { index, item in
-                            WindowRow(
-                                name: "\(item.provider) · \(compactWindowLabel(item.window.label))",
-                                window: item.window,
-                                barBase: item.barBase
-                            )
-                            if index < namedWindows.count - 1 {
-                                Divider().opacity(0.55)
+            } else if !windows.isEmpty {
+                ScrollView {
+                    PanelCard {
+                        VStack(spacing: 12) {
+                            ForEach(Array(windows.enumerated()), id: \.element.id) { index, item in
+                                WindowRow(
+                                    name: item.provider + (item.window.map { " · \(compactWindowLabel($0))" } ?? ""),
+                                    window: item.window,
+                                    barBase: item.barBase,
+                                    status: item.status,
+                                    source: item.source
+                                )
+                                if index < windows.count - 1 {
+                                    Divider().opacity(0.55)
+                                }
                             }
                         }
                     }
@@ -220,11 +257,12 @@ private struct UsageActivityGroup: View {
     }
 
     private var fullCapacityText: String? {
-        guard let estimate = store.weeklyValue(for: provider) else { return nil }
-        let value = estimate.equivalentValueUSD.formatted(
-            .currency(code: "USD").precision(.fractionLength(0))
-        )
-        return "WEEKLY ≈ \(value) · \(compactTokens(estimate.equivalentTokens))"
+        let estimates = store.weeklyValues(for: provider)
+        guard !estimates.isEmpty else { return nil }
+        let tokens = estimates.reduce(0) { $0 + $1.equivalentTokens }
+        let value = estimates.reduce(0) { $0 + $1.equivalentValueUSD }
+            .formatted(.currency(code: "USD").precision(.fractionLength(0)))
+        return "WEEKLY ≈ \(value) · \(compactTokens(tokens))"
     }
 
     var body: some View {
@@ -234,10 +272,8 @@ private struct UsageActivityGroup: View {
                     Text(provider.title)
                         .font(.system(size: TokenBarType.primary, weight: .semibold))
                         .foregroundStyle(Palette.ink)
-                        .padding(.leading, 10)
                 } else {
                     ProviderMark(provider: provider, color: color)
-                        .padding(.leading, 10)
                 }
                 if let fullCapacityText {
                     Text(fullCapacityText)
@@ -309,16 +345,19 @@ private struct UsageActivityGroup: View {
 
 private struct WindowRow: View {
     let name: String
-    let window: LimitWindow
+    let window: LimitWindow?
     let barBase: NSColor
+    let status: String?
+    let source: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(name)
                     .font(.system(size: TokenBarType.primary, weight: .semibold))
+                    .lineLimit(2)
                 Spacer()
-                Text("\(Int(window.usedPercent.rounded()))%")
+                Text(window.map { "\(Int($0.usedPercent.rounded()))%" } ?? "--")
                     .font(.system(size: TokenBarType.primary, weight: .bold, design: .rounded))
                     .monospacedDigit()
             }
@@ -326,21 +365,21 @@ private struct WindowRow: View {
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
                     Capsule().fill(Palette.track.opacity(0.52))
-                    Capsule()
-                        .fill(progressColor)
-                        .frame(width: max(5, proxy.size.width * window.usedPercent / 100))
+                    if let window {
+                        Capsule()
+                            .fill(Color(nsColor: QuotaBarColor.at(window.usedPercent, base: barBase)))
+                            .frame(width: max(5, proxy.size.width * window.usedPercent / 100))
+                    }
                 }
             }
             .frame(height: 7)
 
-            Text(resetText(window.resetsAt))
+            Text(status ?? resetText(window?.resetsAt))
             .font(.system(size: TokenBarType.secondary, weight: .medium))
             .foregroundStyle(Palette.secondary)
+            .lineLimit(2)
         }
-    }
-
-    private var progressColor: Color {
-        Color(nsColor: QuotaBarColor.at(window.usedPercent, base: barBase))
+        .help("\(name). Source: \(source). " + (status ?? "Percentage used for this account and window."))
     }
 }
 
@@ -460,52 +499,11 @@ private struct ActivityTile: View {
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
+        .padding(.horizontal, AppleGeometry.contentInset)
+        .padding(.vertical, 10)
         .appleConcentricSurface(
             fill: Palette.surface.opacity(0.76),
             border: Palette.separator.opacity(0.32),
-            fallbackRadius: AppleGeometry.controlFallbackRadius
-        )
-    }
-}
-
-private struct ErrorSummary: View {
-    @EnvironmentObject private var store: TokenBarStore
-
-    var body: some View {
-        let providers = [store.snapshot.claude, store.snapshot.codex]
-        let providerErrors: [String] = providers.compactMap { provider -> String? in
-            guard !provider.isStale || provider.headlinePercent == nil else { return nil }
-            return provider.error
-        } + [
-            store.snapshot.codexActivityError,
-            store.snapshot.claudeWeeklyValueError?.hasPrefix("Exact local scan failed") == true
-                ? store.snapshot.claudeWeeklyValueError
-                : nil,
-        ].compactMap { $0 }
-        let errors = Array(Set(providerErrors)).sorted()
-        if !errors.isEmpty {
-            ErrorBanner(text: errors.joined(separator: " "))
-        }
-    }
-}
-
-private struct ErrorBanner: View {
-    let text: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(Palette.warning)
-            Text(text)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Palette.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(11)
-        .appleConcentricSurface(
-            fill: Palette.warning.opacity(0.09),
-            border: Color.clear,
             fallbackRadius: AppleGeometry.controlFallbackRadius
         )
     }
@@ -515,6 +513,7 @@ private struct FooterBar: View {
     @EnvironmentObject private var store: TokenBarStore
 
     var body: some View {
+        let errors = errorDetails
         HStack(spacing: 12) {
             Button {
                 if store.isRefreshing {
@@ -534,7 +533,9 @@ private struct FooterBar: View {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 Text(updatedText(at: context.date))
                     .font(.system(size: TokenBarType.secondary, weight: .medium))
-                    .foregroundStyle(Palette.secondary)
+                    .foregroundStyle(errors.isEmpty ? Palette.secondary : Palette.failure)
+                    .help(errors.isEmpty ? "Last successful update." : errors)
+                    .accessibilityHint(errors)
             }
 
             Button {
@@ -546,9 +547,9 @@ private struct FooterBar: View {
             .help("Quit Token Bar")
             .accessibilityLabel("Quit Token Bar")
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, AppleGeometry.pageInset)
         .padding(.top, 4)
-        .padding(.bottom, 22)
+        .padding(.bottom, 8)
     }
 
     private func footerIcon(_ systemName: String) -> some View {
@@ -564,33 +565,30 @@ private struct FooterBar: View {
             return "Refreshing"
         }
 
-        let staleProviders: [(name: String, snapshot: ProviderSnapshot)] = [
-            ("Claude", store.snapshot.claude),
-            ("Codex", store.snapshot.codex),
-        ].filter { $0.snapshot.isStale }
-
-        if staleProviders.count == 1, let stale = staleProviders.first {
-            if stale.name == "Claude",
-               stale.snapshot.error?.localizedCaseInsensitiveContains("expired") == true {
-                return "Claude sign-in required"
-            }
-            guard let date = stale.snapshot.lastSuccessAt else {
-                return "\(stale.name) stale"
-            }
-            return "\(stale.name) stale · \(compactElapsedTime(from: date, to: now))"
-        }
-
-        if staleProviders.count > 1 {
-            let oldest = staleProviders.compactMap(\.snapshot.lastSuccessAt).min()
-            guard let oldest else { return "Stale" }
-            return "Stale · \(compactElapsedTime(from: oldest, to: now))"
-        }
-
         guard let date = store.lastSuccessDate(for: .overview) else {
             return "Not updated"
         }
-        let relative = compactElapsedTime(from: date, to: now)
-        return relative
+        return compactElapsedTime(from: date, to: now)
+    }
+
+    private var errorDetails: String {
+        let snapshot = store.snapshot
+        let profiles: [(String, ProviderSnapshot)] = [
+            ("Claude", snapshot.claude),
+            ("Codex", snapshot.codex),
+        ] + (snapshot.additionalClaudeAccounts ?? []).map {
+            ($0.name, $0.quota)
+        } + snapshot.visibleCodexAccounts.map {
+            ($0.name, $0.quota)
+        }
+        var messages = profiles.compactMap { name, quota in
+            quota.error.map { "\(name): \($0)" }
+        }
+        if let error = snapshot.codexActivityError, error != snapshot.codex.error {
+            messages.append("Codex activity: \(error)")
+        }
+        messages += store.estimateFailures.map { "\($0.key): \($0.value)" }
+        return Array(Set(messages)).sorted().joined(separator: "\n\n")
     }
 
     private func compactElapsedTime(from date: Date, to now: Date) -> String {
@@ -615,7 +613,7 @@ private struct PanelCard<Content: View>: View {
 
     var body: some View {
         content
-            .padding(12)
+            .padding(AppleGeometry.contentInset)
             .frame(maxWidth: .infinity, alignment: .leading)
             .appleConcentricSurface(
                 fill: Palette.surface.opacity(0.76),
@@ -700,10 +698,13 @@ private struct EmptyState: View {
 
 private struct NamedWindow: Identifiable {
     let provider: String
-    let window: LimitWindow
+    let scope: String
+    let source: String
+    let window: LimitWindow?
     let barBase: NSColor
+    let status: String?
 
-    var id: String { provider + window.label }
+    var id: String { scope + source + (window?.id ?? "unavailable") }
 }
 
 private func resetText(_ date: Date?) -> String {
@@ -716,11 +717,12 @@ private func resetText(_ date: Date?) -> String {
     return "Resets in " + (formatter.string(from: Date(), to: date) ?? "soon")
 }
 
-private func compactWindowLabel(_ label: String) -> String {
-    label.replacingOccurrences(of: " window", with: "")
+private func compactWindowLabel(_ window: LimitWindow) -> String {
+    if window.windowMinutes == 7 * 24 * 60 { return "Weekly" }
+    return window.label.replacingOccurrences(of: " window", with: "")
 }
 
-private func compactTokens(_ value: Int64) -> String {
+func compactTokens(_ value: Int64) -> String {
     let absolute = Double(abs(value))
     let sign = value < 0 ? "-" : ""
     if absolute >= 1_000_000_000 {

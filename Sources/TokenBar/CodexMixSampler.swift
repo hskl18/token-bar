@@ -2,38 +2,34 @@ import Foundation
 
 struct CodexMixSampler {
     private let readChunkBytes = 1024 * 1024
-    private let defaults: UserDefaults
     private let parser = CodexTranscriptParser()
 
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-    }
-
     func update() async -> CodexUsageLedger {
-        await Task.detached(priority: .utility) {
-            updateSynchronously()
-        }.value
+        let scan = Task.detached(priority: .utility) { updateSynchronously() }
+        return await withTaskCancellationHandler(operation: { await scan.value }, onCancel: { scan.cancel() })
     }
 
     private func updateSynchronously() -> CodexUsageLedger {
         let calendar = Calendar.current
-        let cutoff = calendar.dateInterval(of: .year, for: Date())?.start
-            ?? calendar.startOfDay(for: Date())
-        let cutoffDay = Self.dayFormatter.string(from: cutoff)
+        // UTC day keys: start a day early so the UTC day spanning the local cutoff is complete.
+        let cutoff = min(
+            ActivityPeriod.year.interval(calendar: calendar).start,
+            ActivityPeriod.week.interval(calendar: calendar).start
+        ).addingTimeInterval(-24 * 60 * 60)
+        let cutoffDay = TokenActivity.utcDayFormatter.string(from: cutoff)
         let files = sessionFiles(since: cutoff)
         let activePaths = Set(files.map { $0.url.path })
         var ledger = loadLedger()
+        let original = ledger
 
-        let removed = ledger.cursors.keys.contains { !activePaths.contains($0) }
-        let truncated = files.contains { file in
-            ledger.cursors[file.url.path].map { file.size < $0.offset } ?? false
-        }
-        if removed || truncated {
-            ledger = .empty
+        ledger.cursors = ledger.cursors.filter { activePaths.contains($0.key) }
+        for file in files where file.size < (ledger.cursors[file.url.path]?.offset ?? 0) {
+            ledger.cursors.removeValue(forKey: file.url.path)
         }
 
         var seenHashes = Set(ledger.messageHashesByDay.values.joined())
         for file in files {
+            if Task.isCancelled { return ledger }
             let path = file.url.path
             var cursor = ledger.cursors[path] ?? CodexWindowCursor(
                 offset: 0,
@@ -61,6 +57,7 @@ struct CodexMixSampler {
                 var discardingLine = false
 
                 while readOffset < file.size {
+                    if Task.isCancelled { try? handle.close(); return ledger }
                     let count = Int(min(UInt64(readChunkBytes), file.size - readOffset))
                     let data = try autoreleasepool {
                         try handle.read(upToCount: count) ?? Data()
@@ -84,7 +81,6 @@ struct CodexMixSampler {
                     ledger.cursors[path] = cursor
                 }
                 try handle.close()
-                save(ledger)
             } catch {
                 try? handle.close()
             }
@@ -93,59 +89,15 @@ struct CodexMixSampler {
         ledger.cursors = ledger.cursors.filter { activePaths.contains($0.key) }
         ledger.byDayAndModel = ledger.byDayAndModel.filter { $0.key >= cutoffDay }
         ledger.messageHashesByDay = ledger.messageHashesByDay.filter { $0.key >= cutoffDay }
-        save(ledger)
+        if ledger != original { save(ledger) }
         return ledger
     }
 
-    private func sessionFiles(since cutoff: Date) -> [CodexMixFile] {
-        let environment = ProcessInfo.processInfo.environment
-        let codexHome = environment["CODEX_HOME"].map(URL.init(fileURLWithPath:))
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
-        let root = codexHome.appendingPathComponent("sessions", isDirectory: true)
-        let keys: Set<URLResourceKey> = [
-            .isRegularFileKey,
-            .fileSizeKey,
-            .contentModificationDateKey,
-        ]
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles]
-        ) else {
-            return []
-        }
-
-        let cutoffDay = Self.utcDayFormatter.string(from: cutoff)
-        return enumerator.compactMap { item -> CodexMixFile? in
-            guard let url = item as? URL,
-                  url.pathExtension == "jsonl",
-                  let values = try? url.resourceValues(forKeys: keys),
-                  values.isRegularFile == true,
-                  let fileSize = values.fileSize,
-                  fileSize > 0
-            else {
-                return nil
-            }
-            let pathIsRecent = sessionPathDay(url.path).map { $0 >= cutoffDay } ?? false
-            let modifiedIsRecent = (values.contentModificationDate ?? .distantPast) >= cutoff
-            guard pathIsRecent || modifiedIsRecent else { return nil }
-            return CodexMixFile(url: url, size: UInt64(fileSize))
-        }
-        .sorted { $0.url.path < $1.url.path }
-    }
-
-    private func sessionPathDay(_ path: String) -> String? {
-        let parts = URL(fileURLWithPath: path).pathComponents
-        guard let sessionsIndex = parts.lastIndex(of: "sessions"),
-              parts.count > sessionsIndex + 3
-        else {
-            return nil
-        }
-        let dateParts = parts[(sessionsIndex + 1)...(sessionsIndex + 3)]
-        guard dateParts.count == 3, dateParts.allSatisfy({ Int($0) != nil }) else {
-            return nil
-        }
-        return dateParts.joined(separator: "-")
+    private func sessionFiles(since cutoff: Date) -> [TranscriptFile] {
+        let home = AccountSource.primaryDirectory(for: .codex)
+        return TranscriptFile.list(in: ["sessions", "archived_sessions"].map {
+            home.appendingPathComponent($0)
+        }, since: cutoff)
     }
 
     private func consumeChunk(
@@ -217,39 +169,10 @@ struct CodexMixSampler {
     }
 
     private func loadLedger() -> CodexUsageLedger {
-        guard let data = defaults.data(forKey: StorageKeys.codexUsageLedger),
-              let ledger = try? JSONDecoder().decode(CodexUsageLedger.self, from: data)
-        else {
-            return .empty
-        }
-        return ledger
+        TranscriptCache.load(CodexUsageLedger.self, key: StorageKeys.codexUsageLedger) ?? .empty
     }
 
     private func save(_ ledger: CodexUsageLedger) {
-        guard let data = try? JSONEncoder().encode(ledger) else { return }
-        defaults.set(data, forKey: StorageKeys.codexUsageLedger)
+        TranscriptCache.save(ledger, key: StorageKeys.codexUsageLedger)
     }
-
-    private static let utcDayFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter
-    }()
-
-    private static let dayFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter
-    }()
-}
-
-private struct CodexMixFile {
-    var url: URL
-    var size: UInt64
 }

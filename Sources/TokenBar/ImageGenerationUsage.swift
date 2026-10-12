@@ -6,10 +6,10 @@ struct ImageGenerationRecord: Codable, Hashable {
     var height: Int
 
     var estimatedOutputTokens: Int64 {
-        let w = max(16, (Double(width) / 16).rounded() * 16)
-        let h = max(16, (Double(height) / 16).rounded() * 16)
+        let w = max(16, (Double(width) / 16).rounded(.toNearestOrEven) * 16)
+        let h = max(16, (Double(height) / 16).rounded(.toNearestOrEven) * 16)
         let mediumGrid = 48.0
-        let grid = mediumGrid * max(1, (mediumGrid * min(w, h) / max(w, h)).rounded())
+        let grid = mediumGrid * max(1, (mediumGrid * min(w, h) / max(w, h)).rounded(.toNearestOrEven))
         return Int64(ceil(grid * (2_000_000 + w * h) / 4_000_000))
     }
 
@@ -63,8 +63,7 @@ struct ImageGenerationSampler {
             ?? ImageGenerationUsage()
         let previous = usage
         usage.scanError = nil
-        let home = ProcessInfo.processInfo.environment["CODEX_HOME"].map(URL.init(fileURLWithPath:))
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
+        let home = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
         let root = home.appendingPathComponent("generated_images", isDirectory: true)
         guard !root.pathComponents.contains(where: { $0.lowercased() == "trash" }) else {
             usage.scanError = "The configured image directory is excluded."

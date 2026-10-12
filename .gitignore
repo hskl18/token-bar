@@ -22,9 +22,13 @@ SHA256SUMS
 # Local editor and agent instructions
 .idea/
 .vscode/
+.agents/
 .claude/
 .codex/
+AGENTS.md
+AGENTS.override.md
 CLAUDE.md
+GEMINI.md
 
 # Private investigation notes and local diagnostic artifacts
 /.local/

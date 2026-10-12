@@ -63,8 +63,6 @@ struct LimitWindow: Codable, Hashable, Identifiable {
     var quotaDisplayName: String {
         guard let limitID, limitID != "codex" else { return "Codex" }
         if let limitName, !limitName.isEmpty { return limitName }
-        // Older cached snapshots did not persist the server's display name.
-        if limitID == "codex_bengalfox" { return "GPT-5.3-Codex-Spark" }
         return "Additional quota"
     }
 
@@ -115,7 +113,7 @@ struct ProviderSnapshot: Codable, Hashable {
     var weeklyPercent: Double? {
         let windows = [longWindow, shortWindow].compactMap { $0 } + extraWindows
         guard let percent = windows.first(where: {
-            $0.windowMinutes == 7 * 24 * 60
+            $0.windowMinutes == 7 * 24 * 60 && $0.limitID?.hasPrefix("claude:") != true
         })?.usedPercent, percent.isFinite else {
             return nil
         }
@@ -129,6 +127,23 @@ struct ProviderSnapshot: Codable, Hashable {
     }
 }
 
+struct ClaudeAccountSnapshot: Codable, Hashable, Identifiable {
+    var id: String
+    var name: String
+    var sourceDirectory: String
+    var quota: ProviderSnapshot
+}
+
+struct CodexAccountSnapshot: Codable, Hashable, Identifiable {
+    var id: String
+    var name: String
+    var sourceDirectory: String
+    var accountID: String? = nil
+    var quota: ProviderSnapshot
+    var weeklyValue: WeeklyValueEstimate? = nil
+    var invalidatedReset: Date? = nil
+}
+
 struct DailyUsageBucket: Codable, Hashable, Identifiable {
     var startDate: String
     var tokens: Int64
@@ -139,28 +154,26 @@ struct DailyUsageBucket: Codable, Hashable, Identifiable {
 struct TokenActivity: Codable, Hashable {
     var lifetimeTokens: Int64?
     var daily: [DailyUsageBucket]
+    // Codex account buckets are UTC days; each belongs to the local day containing its midpoint.
+    var utcDays: Bool? = nil
 
     static let empty = TokenActivity(lifetimeTokens: nil, daily: [])
 
-    func tokens(in interval: DateInterval, calendar: Calendar = .current) -> Int64 {
-        daily.reduce(into: 0) { total, bucket in
-            guard let date = Self.dayFormatter.date(from: bucket.startDate) else { return }
-            let localDay = calendar.startOfDay(for: date)
-            if interval.contains(localDay) {
-                total += bucket.tokens
-            }
+    func buckets(in interval: DateInterval, calendar: Calendar = .current) -> [DailyUsageBucket] {
+        daily.filter { bucket in
+            let date = utcDays == true
+                ? Self.utcDayFormatter.date(from: bucket.startDate)?.addingTimeInterval(12 * 60 * 60)
+                : Self.dayFormatter.date(from: bucket.startDate).map { calendar.startOfDay(for: $0) }
+            return date.map { $0 >= interval.start && $0 < interval.end } ?? false
         }
     }
 
+    func tokens(in interval: DateInterval, calendar: Calendar = .current) -> Int64 {
+        buckets(in: interval, calendar: calendar).reduce(0) { $0 + $1.tokens }
+    }
+
     func dayKeys(in interval: DateInterval, calendar: Calendar = .current) -> Set<String> {
-        Set(daily.compactMap { bucket in
-            guard let date = Self.dayFormatter.date(from: bucket.startDate),
-                  interval.contains(calendar.startOfDay(for: date))
-            else {
-                return nil
-            }
-            return bucket.startDate
-        })
+        Set(buckets(in: interval, calendar: calendar).map(\.startDate))
     }
 
     private static let dayFormatter: DateFormatter = {
@@ -172,7 +185,16 @@ struct TokenActivity: Codable, Hashable {
         return formatter
     }()
 
+    static let utcDayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
 }
+
 
 struct CodexAccountWindowBaseline: Codable, Hashable {
     var windowID: String
@@ -182,6 +204,7 @@ struct CodexAccountWindowBaseline: Codable, Hashable {
     var lifetimeTokens: Int64
     var observedAt: Date
     var startsAtWindowBoundary: Bool
+    var usedPercent: Double? = nil
 }
 
 struct TokenBreakdown: Codable, Hashable {
@@ -205,6 +228,18 @@ struct TokenBreakdown: Codable, Hashable {
         reasoning += other.reasoning
     }
 
+    func positiveDelta(from previous: TokenBreakdown) -> TokenBreakdown {
+        TokenBreakdown(
+            input: max(0, input - previous.input),
+            cacheCreationInput: max(0, cacheCreationInput - previous.cacheCreationInput),
+            cacheCreationInput5m: cacheCreationInput5m.map { max(0, $0 - (previous.cacheCreationInput5m ?? 0)) },
+            cacheCreationInput1h: cacheCreationInput1h.map { max(0, $0 - (previous.cacheCreationInput1h ?? 0)) },
+            cachedInput: max(0, cachedInput - previous.cachedInput),
+            output: max(0, output - previous.output),
+            reasoning: max(0, reasoning - previous.reasoning)
+        )
+    }
+
     private func addingOptional(_ left: Int64?, _ right: Int64?) -> Int64? {
         guard left != nil || right != nil else { return nil }
         return (left ?? 0) + (right ?? 0)
@@ -217,7 +252,24 @@ struct TokenTotals: Codable, Hashable {
     var output: Int64
     var reasoning: Int64
     var total: Int64
+    var cacheWriteInput: Int64? = nil
 
+}
+
+enum UsagePriceKey {
+    static func make(model: String, speed: String? = nil, longContext: Bool = false) -> String {
+        var key = model
+        if speed == "fast" || speed == "priority" { key += "|fast" }
+        if speed == "ultrafast" { key += "|ultrafast" }
+        if longContext { key += "|long" }
+        return key
+    }
+
+    static func model(_ key: String) -> String { String(key.prefix { $0 != "|" }) }
+
+    static func speed(_ key: String) -> String {
+        key.contains("|ultrafast") ? "|ultrafast" : key.contains("|fast") ? "|fast" : ""
+    }
 }
 
 struct MixLedger: Codable, Hashable {
@@ -243,6 +295,10 @@ struct ModelPrice: Codable, Hashable {
     var cachedInputPerToken: Double
     var outputPerToken: Double
     var reasoningPerToken: Double
+    var longContextInputPerToken: Double? = nil
+    var longContextCachedInputPerToken: Double? = nil
+    var longContextCacheCreationInputPerToken: Double? = nil
+    var longContextOutputPerToken: Double? = nil
 }
 
 struct PriceSourceCache: Codable, Hashable {
@@ -290,16 +346,15 @@ struct CostMix: Codable, Hashable {
         unpricedTokens: nil
     )
 
+    var hasPricedCoverage: Bool {
+        let observed = sampledTokens + max(0, unpricedTokens ?? 0)
+        return usdPerToken != nil && sampledTokens > 0
+            && Double(sampledTokens) / Double(observed) >= Self.minimumPricedCoverage
+    }
+
     func estimate(tokens: Int64) -> Double? {
         if tokens == 0 { return 0 }
-        guard let usdPerToken, sampledTokens > 0 else {
-            return nil
-        }
-        let unpriced = max(0, unpricedTokens ?? 0)
-        let observed = sampledTokens + unpriced
-        guard observed > 0,
-              Double(sampledTokens) / Double(observed) >= Self.minimumPricedCoverage
-        else { return nil }
+        guard hasPricedCoverage, let usdPerToken else { return nil }
         return Double(tokens) * usdPerToken
     }
 
@@ -352,6 +407,7 @@ struct WeeklyTokenCapacityEstimate: Codable, Hashable {
     var usedPercent: Double
     var observedTokens: Int64
     var equivalentTokens: Double
+    var equivalentValueUSD: Double? = nil
 }
 
 struct WeeklyCapacitySample: Codable, Hashable {
@@ -363,6 +419,7 @@ struct WeeklyCapacitySample: Codable, Hashable {
     var observedTokens: Int64
     var equivalentTokens: Double
     var source: String?
+    var equivalentValueUSD: Double? = nil
 }
 
 struct WeeklyCapacityHistory: Codable, Hashable {
@@ -383,7 +440,11 @@ enum CodexWeeklyEstimateSource: String, Codable, Hashable {
 
 struct AppSnapshot: Codable, Hashable {
     var claude: ProviderSnapshot
+    var additionalClaudeAccounts: [ClaudeAccountSnapshot]? = nil
+    var claudeAccountID: String? = nil
     var codex: ProviderSnapshot
+    var additionalCodexAccounts: [CodexAccountSnapshot]? = nil
+    var codexAccountID: String? = nil
     var tokenActivity: TokenActivity
     var costMix: CostMix
     var claudeTokenActivity: TokenActivity?
@@ -400,9 +461,9 @@ struct AppSnapshot: Codable, Hashable {
     var codexWeeklyEstimateSource: CodexWeeklyEstimateSource?
     var codexAccountWindowBaselines: [CodexAccountWindowBaseline]?
     var codexWeeklyEstimateVersion: Int?
+    var codexWeeklyInvalidatedReset: Date? = nil
     var codexActivityError: String?
     var codexActivityLastSuccessAt: Date?
-    var codexTodayIsLocalEstimate: Bool?
     var imageGenerationUsage: ImageGenerationUsage? = nil
     var updatedAt: Date?
 
@@ -424,10 +485,9 @@ struct AppSnapshot: Codable, Hashable {
         codexWeeklyValueError: nil,
         codexWeeklyEstimateSource: nil,
         codexAccountWindowBaselines: [],
-        codexWeeklyEstimateVersion: 4,
+        codexWeeklyEstimateVersion: 5,
         codexActivityError: nil,
         codexActivityLastSuccessAt: nil,
-        codexTodayIsLocalEstimate: nil,
         updatedAt: nil
     )
 
@@ -435,18 +495,16 @@ struct AppSnapshot: Codable, Hashable {
         let providers: [(ProviderSnapshot, Double?)] = [
             (
                 claude,
-                claudeWeeklyCapacity?.equivalentTokens
-                    ?? claudeWeeklyValue?.equivalentTokens
+                claudeWeeklyValue?.equivalentValueUSD
             ),
             (
                 codex,
-                codexWeeklyCapacity?.equivalentTokens
-                    ?? codexWeeklyValue?.equivalentTokens
+                codexWeeklyValue?.equivalentValueUSD
             ),
         ]
 
-        var usedTokens = 0.0
-        var capacityTokens = 0.0
+        var usedValue = 0.0
+        var capacityValue = 0.0
         for (provider, capacity) in providers {
             guard let capacity,
                   capacity.isFinite,
@@ -455,24 +513,40 @@ struct AppSnapshot: Codable, Hashable {
             else {
                 return nil
             }
-            usedTokens += capacity * percent / 100
-            capacityTokens += capacity
+            usedValue += capacity * percent / 100
+            capacityValue += capacity
         }
 
-        guard capacityTokens > 0 else { return nil }
-        return min(100, max(0, usedTokens / capacityTokens * 100))
+        guard capacityValue > 0 else { return nil }
+        return min(100, max(0, usedValue / capacityValue * 100))
     }
 
     var presentation: ProviderPresentation {
         let hasClaude = claude.hasDisplayableData
         let hasCodex = codex.hasDisplayableData
-
         switch (hasClaude, hasCodex) {
         case (false, false): return .none
         case (true, false): return .claudeOnly
         case (false, true): return .codexOnly
         case (true, true): return .both
         }
+    }
+
+    // A stale primary yields its quota rows to a fresh reading of the same account.
+    var primaryCodexYields: Bool {
+        codex.isStale && codexAccountID != nil && (additionalCodexAccounts ?? []).contains {
+            $0.accountID == codexAccountID && !$0.quota.isStale
+        }
+    }
+
+    var visibleCodexAccounts: [CodexAccountSnapshot] {
+        // One row per account, preferring a fresh reading.
+        let accounts = additionalCodexAccounts ?? []
+        var seen = Set(primaryCodexYields ? [] : [codexAccountID].compactMap { $0 })
+        let shown = Set((accounts.filter { !$0.quota.isStale } + accounts.filter(\.quota.isStale))
+            .filter { seen.insert($0.accountID ?? $0.id).inserted }
+            .map(\.id))
+        return accounts.filter { shown.contains($0.id) }
     }
 }
 
@@ -484,6 +558,7 @@ struct CodexWindowCursor: Codable, Hashable {
     var sawSessionMeta: Bool?
     var suppressingForkCopies: Bool?
     var forkCopyAnchor: Date?
+    var serviceTier: String? = nil
 }
 
 struct CodexWindowLedger: Codable, Hashable {
@@ -491,8 +566,7 @@ struct CodexWindowLedger: Codable, Hashable {
     var resetsAt: Date
     var observedAt: Date
     var cursors: [String: CodexWindowCursor]
-    var byModel: [String: TokenBreakdown]
-    var tokensByDay: [String: Int64]
+    var byDayAndModel: [String: [String: TokenBreakdown]]
     var messageHashes: Set<UInt64>
     var parseErrors: Int
     var isComplete: Bool
@@ -503,8 +577,7 @@ struct CodexWindowLedger: Codable, Hashable {
             resetsAt: resetsAt,
             observedAt: observedAt,
             cursors: [:],
-            byModel: [:],
-            tokensByDay: [:],
+            byDayAndModel: [:],
             messageHashes: [],
             parseErrors: 0,
             isComplete: false
@@ -512,20 +585,27 @@ struct CodexWindowLedger: Codable, Hashable {
     }
 
     var observedTokens: Int64 {
-        byModel.values.reduce(0) { $0 + $1.total }
+        mixLedger.byModel.values.reduce(0) { $0 + $1.total }
     }
 
     var mixLedger: MixLedger {
-        MixLedger(byDayAndModel: ["window": byModel])
+        MixLedger(byDayAndModel: byDayAndModel)
     }
+}
+
+struct ClaudeMessageUsage: Codable, Hashable {
+    var day: String
+    var byModel: [String: TokenBreakdown]
 }
 
 struct ClaudeUsageLedger: Codable, Hashable {
     var cursors: [String: UInt64]
     var byDayAndModel: [String: [String: TokenBreakdown]]
-    var messageHashesByDay: [String: Set<UInt64>]
+    var messageUsage: [UInt64: ClaudeMessageUsage]
+    // Older messages can no longer stream, so a hash is enough to skip resumed-session copies.
+    var settledHashesByDay: [String: Set<UInt64>]?
 
-    static let empty = ClaudeUsageLedger(cursors: [:], byDayAndModel: [:], messageHashesByDay: [:])
+    static let empty = ClaudeUsageLedger(cursors: [:], byDayAndModel: [:], messageUsage: [:])
 }
 
 struct CodexUsageLedger: Codable, Hashable {
@@ -551,8 +631,8 @@ struct ClaudeWindowLedger: Codable, Hashable {
     var resetsAt: Date
     var observedAt: Date
     var cursors: [String: UInt64]
-    var byModel: [String: TokenBreakdown]
-    var messageHashes: Set<UInt64>
+    var byDayAndModel: [String: [String: TokenBreakdown]]
+    var messageUsage: [UInt64: ClaudeMessageUsage]
     var parseErrors: Int
     var isComplete: Bool
 
@@ -562,18 +642,18 @@ struct ClaudeWindowLedger: Codable, Hashable {
             resetsAt: resetsAt,
             observedAt: observedAt,
             cursors: [:],
-            byModel: [:],
-            messageHashes: [],
+            byDayAndModel: [:],
+            messageUsage: [:],
             parseErrors: 0,
             isComplete: false
         )
     }
 
     var observedTokens: Int64 {
-        byModel.values.reduce(0) { $0 + $1.total }
+        mixLedger.byModel.values.reduce(0) { $0 + $1.total }
     }
 
     var mixLedger: MixLedger {
-        MixLedger(byDayAndModel: ["window": byModel])
+        MixLedger(byDayAndModel: byDayAndModel)
     }
 }

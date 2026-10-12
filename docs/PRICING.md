@@ -12,7 +12,8 @@ Token Bar resolves model prices in this order:
 3. [LiteLLM model price catalog](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)
 
 Official rows override fallback rows.
-The app checks at most once every 24 hours and refreshes sooner when logs contain a missing model.
+The app checks official sources at most once every 24 hours and refreshes sooner when logs contain a missing model.
+The fallback catalog is requested only for models missing from both official sources, at most weekly.
 Each source keeps its own ETag, retry time, and last-known-good rows.
 
 Unknown models stay unpriced.
@@ -33,6 +34,12 @@ model cost =
 
 The Codex parser avoids charging reasoning twice when output already includes it.
 Older Claude records without cache duration use the standard cache-write rate for the unsplit remainder.
+Codex input includes cache reads and writes, so both are subtracted before pricing ordinary input; Claude input excludes them.
+
+Recorded Fast and Ultrafast requests use the provider's published rows for that speed, not a fixed multiplier.
+Claude's fast table lists input and output only, so its cache rates scale with the fast input rate.
+Codex requests over 272,000 input tokens use the official long-context columns when available.
+A recorded speed without a published rate stays unpriced, and unrecorded speeds cannot be inferred from token counts.
 
 ## Calendar periods
 
@@ -46,8 +53,9 @@ All period cost = Claude period cost + Codex period cost
 ```
 
 Claude token totals and price mix come from the same local records.
-Codex token totals come from the account response, while the price mix comes from same-period Codex records on this Mac.
-The app hides dollars when a usable same-period mix is absent.
+Codex token totals come from the account's daily buckets, which cover every device and report UTC days.
+Each bucket belongs to the local day that contains its midpoint, and is priced with the same UTC day's mix from Codex records on this Mac.
+Days without a usable local mix use the period's average rate, and the app hides dollars when no day has one.
 
 ## Weekly capacity
 
@@ -56,14 +64,17 @@ current implied capacity = current-window observed tokens × 100 / official week
 Codex weekly value = current-window estimated cost × 100 / official weekly percent
 ```
 
-Codex extrapolates only current-window observations after 3% weekly usage.
+Codex extrapolates only current-window observations at or above 3% weekly usage.
+A falling weekly percentage within one reset window invalidates that window's projection.
 It does not multiply a previous window's token capacity by the current model mix; quota consumption can change when the model mix changes.
 If the account counter has not increased or still trails a complete local weekly ledger, Codex uses that local ledger.
 The estimate stays unavailable without a current-window sample or priced model mix, instead of preserving a stale dollar amount.
+With several Codex accounts, the header sums each account's available estimate, counting the same login once.
 
 Claude uses available local records inside the official 7-day interval.
 Its current-window observations become eligible at 3% used.
 Earlier windows with at least 10% usage can supply same-source priors.
+Claude priors and the current observation are API-equivalent dollars; equivalent tokens are derived from the current mix for display.
 Token Bar retains 12 Claude samples for 70 days, removes large median-absolute-deviation outliers, and blends the robust prior with the current observation in log space.
 Observations from the same quota bucket and source with start and reset times less than two seconds apart count as one window, retaining its latest sample, including when loading older history.
 Another computer can raise the Claude percentage without adding records on this Mac.
@@ -81,7 +92,7 @@ The local fallback requires an exact token match between the ledger and its pric
 
 ## ImageGen output estimates
 
-Token Bar estimates saved PNG outputs under `$CODEX_HOME/generated_images` or `~/.codex/generated_images`.
+Token Bar estimates saved PNG outputs under `~/.codex/generated_images`.
 It assumes GPT Image 2 medium quality, using saved dimensions and file time as proxies for request size and time.
 The [official calculator](https://developers.openai.com/api/docs/guides/image-generation#cost-and-latency) supplies the output-token formula; the bundled rate is [$30 per million output tokens](https://developers.openai.com/api/docs/models/gpt-image-2).
 See [the implementation](../Sources/TokenBar/ImageGenerationUsage.swift) for the calculation.
@@ -103,8 +114,8 @@ Claude and Codex can have different weekly capacities, so Token Bar uses a weigh
 
 ```text
 All percent =
-  sum(provider capacity × provider weekly percent)
-  / sum(provider capacity)
+  sum(provider API-dollar capacity × provider weekly percent)
+  / sum(provider API-dollar capacity)
 ```
 
 All is an app-defined weighted estimate, not a provider-issued shared quota.
@@ -112,17 +123,17 @@ All remains unavailable until both providers have usable capacity evidence.
 
 ## Limits
 
-- Current standard prices apply to retained history rather than reconstructing old price changes.
-- The OpenAI catalog uses short-context Standard rates, without per-request historical, service-tier or long-context pricing.
+- Daily rates are frozen from the first observation and kept for 400 days; earlier history uses the rates available when it was first priced.
+- Speed and long-context adjustments require recorded request metadata and a published rate.
 - Account counters, local records and quota percentages may differ in scope and update timing; the near-start baseline can omit initial usage.
 - Applying a local price mix to account totals assumes representative models and token categories, with matching calendar dates.
-- Completed local scans do not establish whole-account coverage; Codex scans `sessions`, not archives or other hosts.
+- Completed local scans include Codex archives but not other hosts, so they do not establish whole-account coverage.
 - A falling projection alone does not prove a quota reduction or poor image value.
 - Claude cleanup can remove old local sessions.
 - Remote Codex usage lacks a remote model and category breakdown.
 - Internal model labels without a documented price remain unpriced.
 
-Claude records deduplicate by `message.id + requestId` when both fields exist.
+Claude records deduplicate by `message.id + requestId`, using whichever identifier exists when only one does.
 Codex records prefer `last_token_usage`, fall back to cumulative deltas, reject repeated totals, and suppress copied history at the start of forked sessions.
 
 Official prices determine rates, not account coverage or prediction accuracy.
