@@ -76,10 +76,13 @@ struct CodexRuntimeLocator {
         if let desktopApplicationURL {
             let resources = Bundle(url: desktopApplicationURL)?.resourceURL
                 ?? desktopApplicationURL.appendingPathComponent("Contents/Resources", isDirectory: true)
-            candidates.append(CodexRuntimeCandidate(
-                executableURL: resources.appendingPathComponent("codex"),
-                source: .desktopApp
-            ))
+            // ChatGPT.app nests the CLI in an app bundle; earlier desktop builds placed it in Resources.
+            for path in ["codex-cli/CodexCLI.app/Contents/MacOS/codex", "codex"] {
+                candidates.append(CodexRuntimeCandidate(
+                    executableURL: resources.appendingPathComponent(path),
+                    source: .desktopApp
+                ))
+            }
         }
 
         var seen = Set<String>()

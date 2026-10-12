@@ -6,8 +6,7 @@ enum PreviewScenario: String {
     case both
     case codexPlus = "codex-plus"
     case bothPlus = "both-plus"
-    case codexProSpark = "codex-pro-spark"
-    case bothProSpark = "both-pro-spark"
+    case multiAccount = "multi-account"
 
     static func current(environment: [String: String] = ProcessInfo.processInfo.environment) -> Self? {
         environment["TOKENBAR_PREVIEW_STATE"].flatMap(Self.init(rawValue:))
@@ -17,7 +16,7 @@ enum PreviewScenario: String {
         let now = Date()
         var snapshot = AppSnapshot.empty
 
-        if self == .claude || self == .both || self == .bothPlus || self == .bothProSpark {
+        if self == .claude || self == .both || self == .bothPlus || self == .multiAccount {
             let activity = makeActivity(
                 now: now,
                 dailyTokens: [0: 24_600_000, 2: 96_000_000, 10: 286_000_000, 90: 880_000_000]
@@ -103,20 +102,57 @@ enum PreviewScenario: String {
             )
         }
 
-        // Representative of the observed account response, not a rule for every Pro plan.
-        if self == .codexProSpark || self == .bothProSpark {
-            snapshot.codex.extraWindows = [
-                LimitWindow(
-                    label: "5-hour window", usedPercent: 0, windowMinutes: 300,
-                    resetsAt: now.addingTimeInterval(4.5 * 60 * 60),
-                    limitID: "codex_bengalfox", limitName: "GPT-5.3-Codex-Spark"
+        if self == .multiAccount {
+            snapshot.additionalClaudeAccounts = [ClaudeAccountSnapshot(
+                id: "preview-claude-work",
+                name: "Claude-work",
+                sourceDirectory: "~/.claude-work",
+                quota: ProviderSnapshot(
+                    connected: true,
+                    plan: "Claude Code",
+                    shortWindow: LimitWindow(
+                        label: "5-hour window", usedPercent: 18, windowMinutes: 300,
+                        resetsAt: now.addingTimeInterval(3.6 * 60 * 60)
+                    ),
+                    longWindow: LimitWindow(
+                        label: "All models", usedPercent: 34, windowMinutes: 10080,
+                        resetsAt: now.addingTimeInterval(4.5 * 24 * 60 * 60)
+                    ),
+                    extraWindows: [],
+                    error: nil,
+                    lastSuccessAt: now.addingTimeInterval(-12),
+                    stale: false
+                )
+            )]
+            snapshot.additionalCodexAccounts = [CodexAccountSnapshot(
+                id: "~/.codex-work",
+                name: "Codex-work",
+                sourceDirectory: "~/.codex-work",
+                accountID: "preview-codex-work",
+                quota: ProviderSnapshot(
+                    connected: true,
+                    plan: "plus",
+                    shortWindow: LimitWindow(
+                        label: "5-hour window", usedPercent: 27, windowMinutes: 300,
+                        resetsAt: now.addingTimeInterval(1.4 * 60 * 60), limitID: "codex"
+                    ),
+                    longWindow: LimitWindow(
+                        label: "7-day window", usedPercent: 22, windowMinutes: 10080,
+                        resetsAt: now.addingTimeInterval(3.2 * 24 * 60 * 60), limitID: "codex"
+                    ),
+                    extraWindows: [],
+                    error: nil,
+                    lastSuccessAt: now.addingTimeInterval(-12),
+                    stale: false
                 ),
-                LimitWindow(
-                    label: "7-day window", usedPercent: 0, windowMinutes: 10080,
-                    resetsAt: now.addingTimeInterval(6.5 * 24 * 60 * 60),
-                    limitID: "codex_bengalfox", limitName: "GPT-5.3-Codex-Spark"
-                ),
-            ]
+                weeklyValue: WeeklyValueEstimate(
+                    usedPercent: 22,
+                    observedTokens: 25_000_000,
+                    observedCostUSD: 12.10,
+                    equivalentTokens: 113_600_000,
+                    equivalentValueUSD: 55
+                )
+            )]
         }
 
         snapshot.updatedAt = now.addingTimeInterval(-12)

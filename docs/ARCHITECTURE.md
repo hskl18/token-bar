@@ -16,7 +16,8 @@ Official prices + fallback ─ PriceCatalog ─ CostLedger ──┘
 ```
 
 `ProviderSnapshot` contains official percentages, reset times, connection state, cooldowns, and freshness.
-`TokenActivity` contains calendar token totals.
+Extra accounts carry their own `ProviderSnapshot`, keyed by Claude account and organization or by Codex configuration directory.
+`TokenActivity` contains Claude local-day totals and Codex account totals by UTC day.
 `CostLedger` contains day-specific local model and token-category prices.
 Claude's `WeeklyCapacityHistory` contains a bounded set of derived 7-day capacity observations.
 `ImageGenerationUsage` contains saved-file-based estimates, separate from provider token activity.
@@ -25,22 +26,32 @@ These values remain separate because an official quota percentage is not a token
 
 Codex CLI and Codex Desktop are alternate app-server runtimes for one provider.
 Runtime discovery uses `CODEX_BIN`, the remembered working executable, `PATH`, common CLI locations, and Launch Services bundle lookup.
-Token Bar tries the next candidate when a runtime is missing, incompatible, or signed out, and never sums multiple Codex runtimes.
+Token Bar tries the next candidate when a runtime is missing or incompatible, and never sums multiple Codex runtimes.
+A sign-in error belongs to the account, so it ends the search instead of trying another runtime.
+
+## Accounts
+
+The primary accounts are `~/.claude` and `~/.codex`.
+Extra accounts come from `~/.claude-*` and `~/.codex-*` folders that contain a known configuration file, plus `CLAUDE_CONFIG_DIR` and `CODEX_HOME` from the launch environment.
+Discovery lists only the home folder's top level; it does not search deeper or read unrelated files.
+Each Codex account runs its own app-server child with `CODEX_HOME` set, inherited credential variables removed, and analytics disabled.
+Folders the server reports as the same login share one quota request and appear once, preferring a fresh reading.
+Extra accounts add quota rows and, for Codex, a weekly estimate from their own local sessions; activity cards stay on the primary accounts.
 
 The presentation layer derives one of four states from displayable provider data: none, Claude-only, Codex-only, or both.
 Only the dual-provider state renders All, and each state has its own compact panel height.
-Codex shows every returned quota window and expands the panel for additional rows.
-The UI groups rows by quota bucket, places the main Codex bucket first, and orders each bucket by duration.
-The parser retains the server's `limitName` for presentation; older cached Spark windows use a known-name fallback.
+Both providers show every returned quota window, and the panel grows for extra rows until it reaches the screen height, after which the quota area scrolls.
+The UI lists 5-hour rows, then Weekly rows, then any others, keeping account order and the main Codex bucket first.
+The parser retains the server's `limitName` for presentation.
 A missing 5-hour window is never inferred from the plan name; Plus, Pro, and future plans follow the account response.
 Provider headers and combined capacity continue to use the weekly percentage.
 
 The status item owns a native `NSMenu` containing the SwiftUI view.
 AppKit handles menu tracking and dismissal, and the app refreshes stale data when the menu opens.
 Opening the menu does not synchronously read Keychain; a stale Claude credential may be read by the background refresh.
-FSEvents watches local Claude and Codex session directories plus saved Codex images.
-Relevant changes are coalesced for 20 seconds, and event-triggered local scans run at most once per provider every three minutes.
-Only the changed provider is scanned; account requests retain the three-minute freshness limit and Claude rate-limit cooldown.
+FSEvents watches every account's session directories plus saved Codex images.
+Relevant changes are coalesced for 20 seconds, and event-triggered refreshes run at most once per account every three minutes.
+Only the changed account is refreshed; account requests retain the three-minute freshness limit and Claude rate-limit cooldown.
 A 30-minute background refresh covers quota resets, remote devices, and missed file events; the refresh button remains immediate.
 The root SwiftUI view leaves the outer background to the native menu to avoid stacked glass borders.
 
@@ -49,17 +60,19 @@ The root SwiftUI view leaves the outer background to the native menu to avoid st
 `ClaudeMixSampler` owns the available calendar-year Claude ledger.
 `ClaudeWindowSampler` owns the current official Claude weekly interval.
 Both use the same Claude record parser and the same `message.id + requestId` identity.
+The parser keeps per-message token maxima so later streamed snapshots add only their positive deltas.
 
 `CodexTranscriptParser` owns Codex schema interpretation, token delta normalization, model context, stable identity, and fork/subagent copied-history suppression.
 `CodexWindowSampler` uses it for the current official weekly interval.
 `CodexMixSampler` uses it for the available calendar year.
+Both Codex samplers scan `sessions` and `archived_sessions`, and pricing keys record each request's speed tier and long-context use.
 
 Sharing the parser keeps local schema interpretation consistent.
 Account and local sources can still differ in scope and timing; see [pricing limits](PRICING.md#limits).
 
 ## Pricing
 
-`PriceCatalog` resolves current public prices once and produces day-specific `CostMix` values.
+`PriceCatalog` resolves public prices, freezes the first rates resolved for each day, and produces day-specific `CostMix` values.
 The UI asks the store for a period cost, and the store merges only cost rows belonging to that period.
 Unknown models remain visible as tokens.
 The affected dollar value remains available only when known prices cover at least 99.9% of the period sample; otherwise it is unavailable.
@@ -70,13 +83,16 @@ The affected dollar value remains available only when known prices cover at leas
 - Codex quota and account-activity results are independent even though they share one app-server process.
 - Local calendar scans and current-window scans keep separate persisted cursors.
 - Network and parse failures preserve prior successful snapshots.
+- Claude HTTP 401 can trigger one CLI renewal before reporting failure; see [credential recovery](CLAUDE-USAGE.md#credential-recovery).
+- Fetch and local-scan failures turn the footer time yellow, with details in its tooltip.
 - Price refresh failure preserves the last-known-good catalog.
 - Cached structures add new fields as optional values or move to a new storage key when counting semantics change.
 
 ## Persistence and performance
 
 The app reads JSONL files in 1 MiB chunks on utility tasks.
-It stores compact aggregates, offsets, bounded hashes, and bounded capacity samples in `UserDefaults`.
+Transcript ledgers are atomic JSON files under Application Support, written once per completed scan.
+Snapshots, prices, and bounded capacity samples stay in `UserDefaults`.
 It does not retain raw transcript text.
 
 `StorageKeys` is the single registry for persisted Token Bar state.
@@ -85,10 +101,11 @@ The original legacy application domain is left untouched.
 
 Unchanged refreshes seek directly to saved byte offsets.
 The ImageGen sampler runs for Codex activity and fallback refreshes, reads PNG headers/end markers and caches records by generation ID without decoding pixels.
-A truncated or removed source file invalidates the affected local ledger and triggers a deterministic rebuild instead of applying deltas to the wrong history.
+A removed source file drops its cursor while retaining counted usage.
+A truncated file is reread from the start, and persisted identities prevent double counting.
 
-An August 30, 2026 arm64 release build measured 1.8 MB on an M3 Pro MacBook Pro.
-Five two-second idle samples after refresh measured 0.0% CPU and 52.0 MiB resident memory with the panel closed.
+An October 11, 2026 arm64 release build measured 2.3 MB on an M3 Pro MacBook Pro.
+Five two-second idle samples after refresh, with two Claude and two Codex accounts, measured 0.0% to 1.2% CPU and about 29 MiB resident memory with the panel closed.
 The first scan of a large history can take several seconds, while unchanged refreshes resume from saved offsets.
 These measurements describe one machine and dataset rather than a cross-app benchmark.
 

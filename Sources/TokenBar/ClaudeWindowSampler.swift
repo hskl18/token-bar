@@ -2,18 +2,13 @@ import Foundation
 
 struct ClaudeWindowSampler {
     private let readChunkBytes = 1024 * 1024
-    private let defaults: UserDefaults
-    private let lineParser: ClaudeMixSampler
-
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        lineParser = ClaudeMixSampler(defaults: defaults)
-    }
+    private let lineParser = ClaudeMixSampler()
 
     func update(windowStartedAt: Date, resetsAt: Date) async throws -> ClaudeWindowLedger {
-        try await Task.detached(priority: .utility) {
+        let scan = Task.detached(priority: .utility) {
             try updateSynchronously(windowStartedAt: windowStartedAt, resetsAt: resetsAt)
-        }.value
+        }
+        return try await withTaskCancellationHandler(operation: { try await scan.value }, onCancel: { scan.cancel() })
     }
 
     private func updateSynchronously(
@@ -29,21 +24,18 @@ struct ClaudeWindowSampler {
             observedAt: observedAt
         )
 
-        let hasRemovedFile = ledger.cursors.keys.contains { !activePaths.contains($0) }
-        let hasTruncatedFile = files.contains { file in
-            guard let offset = ledger.cursors[file.url.path] else { return false }
-            return file.size < offset
+        let removed = ledger.cursors.keys.contains { !activePaths.contains($0) }
+        let truncated = files.contains { file in file.size < (ledger.cursors[file.url.path] ?? 0) }
+        // Errors may belong to a removed or rewritten file, so rescan the window instead of keeping them.
+        if ledger.parseErrors > 0, removed || truncated {
+            ledger = .empty(windowStartedAt: windowStartedAt, resetsAt: resetsAt, observedAt: observedAt)
         }
-        if hasRemovedFile || hasTruncatedFile {
-            ledger = .empty(
-                windowStartedAt: windowStartedAt,
-                resetsAt: resetsAt,
-                observedAt: observedAt
-            )
-        } else {
-            ledger.observedAt = observedAt
-            ledger.isComplete = false
+        ledger.cursors = ledger.cursors.filter { activePaths.contains($0.key) }
+        for file in files where file.size < (ledger.cursors[file.url.path] ?? 0) {
+            ledger.cursors.removeValue(forKey: file.url.path)
         }
+        ledger.observedAt = observedAt
+        ledger.isComplete = false
 
         for file in files {
             try Task.checkCancellation()
@@ -79,8 +71,6 @@ struct ClaudeWindowSampler {
                 )
                 ledger.cursors[path] = processedOffset
             }
-
-            save(ledger)
         }
 
         ledger.cursors = ledger.cursors.filter { activePaths.contains($0.key) }
@@ -89,36 +79,9 @@ struct ClaudeWindowSampler {
         return ledger
     }
 
-    private func sessionFiles(since windowStartedAt: Date) -> [ClaudeSessionFile] {
-        let root = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/projects", isDirectory: true)
-        let keys: Set<URLResourceKey> = [
-            .isRegularFileKey,
-            .fileSizeKey,
-            .contentModificationDateKey,
-        ]
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles]
-        ) else {
-            return []
-        }
-
-        return enumerator.compactMap { item -> ClaudeSessionFile? in
-            guard let url = item as? URL,
-                  url.pathExtension == "jsonl",
-                  let values = try? url.resourceValues(forKeys: keys),
-                  values.isRegularFile == true,
-                  let fileSize = values.fileSize,
-                  fileSize > 0,
-                  (values.contentModificationDate ?? .distantPast) >= windowStartedAt
-            else {
-                return nil
-            }
-            return ClaudeSessionFile(url: url, size: UInt64(fileSize))
-        }
-        .sorted { $0.url.path < $1.url.path }
+    private func sessionFiles(since windowStartedAt: Date) -> [TranscriptFile] {
+        let root = AccountSource.primaryDirectory(for: .claude).appendingPathComponent("projects")
+        return TranscriptFile.list(in: [root], since: windowStartedAt)
     }
 
     private func consumeChunk(
@@ -160,64 +123,33 @@ struct ClaudeWindowSampler {
         ledger: inout ClaudeWindowLedger
     ) {
         guard isRelevantPrefix(line.prefix(1024)) else { return }
-        guard let object = try? JSONSerialization.jsonObject(with: line),
-              let root = object as? [String: Any]
-        else {
-            ledger.parseErrors += 1
-            return
-        }
-        guard root["type"] as? String == "assistant" else { return }
         guard let record = lineParser.usageRecord(from: line[...]) else {
-            if hasPositiveUsage(in: root) {
-                ledger.parseErrors += 1
-            }
+            if let root = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
+                let message = root["message"] as? [String: Any]
+                let usage = message?["usage"] as? [String: Any] ?? [:]
+                if ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"]
+                    .contains(where: { (usage[$0] as? NSNumber)?.int64Value ?? 0 > 0 }) {
+                    ledger.parseErrors += 1
+                }
+            } else { ledger.parseErrors += 1 }
             return
         }
         guard record.date >= ledger.windowStartedAt, record.date <= ledger.observedAt else {
             return
         }
 
-        let identity = record.dedupeID ?? [
-            path,
-            record.date.timeIntervalSince1970.description,
-            record.model,
-            String(record.breakdown.input),
-            String(record.breakdown.cacheCreationInput),
-            String(record.breakdown.cachedInput),
-            String(record.breakdown.output),
-        ].joined(separator: ":")
+        let identity = record.dedupeID ?? "\(path):\(record.date.timeIntervalSince1970):\(record.model)"
         let hash = lineParser.stableHash(identity)
-        guard ledger.messageHashes.insert(hash).inserted else { return }
-
-        var aggregate = ledger.byModel[record.model] ?? TokenBreakdown()
-        aggregate.add(record.breakdown)
-        ledger.byModel[record.model] = aggregate
+        let day = Self.dayFormatter.string(from: record.date)
+        var message = ledger.messageUsage[hash] ?? ClaudeMessageUsage(day: day, byModel: [:])
+        var models = ledger.byDayAndModel[message.day] ?? [:]
+        record.accumulate(into: &models, previous: &message.byModel)
+        ledger.byDayAndModel[message.day] = models
+        ledger.messageUsage[hash] = message
     }
 
     private func isRelevantPrefix(_ prefix: Data.SubSequence) -> Bool {
-        prefix.range(of: Self.messageMarker) != nil
-    }
-
-    private func hasPositiveUsage(in root: [String: Any]) -> Bool {
-        guard let message = root["message"] as? [String: Any],
-              let usage = message["usage"] as? [String: Any]
-        else {
-            return false
-        }
-        let total = [
-            usage["input_tokens"],
-            usage["cache_creation_input_tokens"],
-            usage["cache_read_input_tokens"],
-            usage["output_tokens"],
-        ].compactMap(numericValue).reduce(0, +)
-        return total > 0
-    }
-
-    private func numericValue(_ value: Any?) -> Int64? {
-        if let value = value as? Int64 { return value }
-        if let value = value as? Int { return Int64(value) }
-        if let value = value as? NSNumber { return value.int64Value }
-        return nil
+        lineParser.isRelevantPrefix(prefix)
     }
 
     private func loadLedger(
@@ -225,10 +157,11 @@ struct ClaudeWindowSampler {
         resetsAt: Date,
         observedAt: Date
     ) -> ClaudeWindowLedger {
-        guard let data = defaults.data(forKey: StorageKeys.claudeWindowLedger),
-              let ledger = try? JSONDecoder().decode(ClaudeWindowLedger.self, from: data),
-              abs(ledger.windowStartedAt.timeIntervalSince(windowStartedAt)) < 1,
-              abs(ledger.resetsAt.timeIntervalSince(resetsAt)) < 1
+        guard let ledger = TranscriptCache.load(
+                ClaudeWindowLedger.self, key: StorageKeys.claudeWindowLedger
+              ),
+              abs(ledger.windowStartedAt.timeIntervalSince(windowStartedAt)) < 2,
+              abs(ledger.resetsAt.timeIntervalSince(resetsAt)) < 2
         else {
             return .empty(
                 windowStartedAt: windowStartedAt,
@@ -240,14 +173,16 @@ struct ClaudeWindowSampler {
     }
 
     private func save(_ ledger: ClaudeWindowLedger) {
-        guard let data = try? JSONEncoder().encode(ledger) else { return }
-        defaults.set(data, forKey: StorageKeys.claudeWindowLedger)
+        TranscriptCache.save(ledger, key: StorageKeys.claudeWindowLedger)
     }
 
-    private static let messageMarker = Data(#""message":{"#.utf8)
-}
+    private static let dayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
 
-private struct ClaudeSessionFile {
-    var url: URL
-    var size: UInt64
 }

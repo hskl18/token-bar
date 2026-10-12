@@ -4,15 +4,21 @@ struct CodexWindowSampler {
     private let readChunkBytes = 1024 * 1024
     private let defaults: UserDefaults
     private let parser = CodexTranscriptParser()
+    private let codexHome: URL
+    private let ledgerKey: String
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, codexHome: URL? = nil) {
         self.defaults = defaults
+        self.codexHome = codexHome ?? AccountSource.primaryDirectory(for: .codex)
+        ledgerKey = codexHome.map { StorageKeys.codexProfileWindowLedger(directory: $0.path) }
+            ?? StorageKeys.codexWindowLedger
     }
 
     func update(windowStartedAt: Date, resetsAt: Date) async throws -> CodexWindowLedger {
-        try await Task.detached(priority: .utility) {
+        let scan = Task.detached(priority: .utility) {
             try updateSynchronously(windowStartedAt: windowStartedAt, resetsAt: resetsAt)
-        }.value
+        }
+        return try await withTaskCancellationHandler(operation: { try await scan.value }, onCancel: { scan.cancel() })
     }
 
     private func updateSynchronously(
@@ -28,21 +34,18 @@ struct CodexWindowSampler {
             observedAt: observedAt
         )
 
-        let hasRemovedFile = ledger.cursors.keys.contains { !activePaths.contains($0) }
-        let hasTruncatedFile = files.contains { file in
-            guard let cursor = ledger.cursors[file.url.path] else { return false }
-            return file.size < cursor.offset
+        let removed = ledger.cursors.keys.contains { !activePaths.contains($0) }
+        let truncated = files.contains { file in file.size < (ledger.cursors[file.url.path]?.offset ?? 0) }
+        // Errors may belong to a removed or rewritten file, so rescan the window instead of keeping them.
+        if ledger.parseErrors > 0, removed || truncated {
+            ledger = .empty(windowStartedAt: windowStartedAt, resetsAt: resetsAt, observedAt: observedAt)
         }
-        if hasRemovedFile || hasTruncatedFile {
-            ledger = .empty(
-                windowStartedAt: windowStartedAt,
-                resetsAt: resetsAt,
-                observedAt: observedAt
-            )
-        } else {
-            ledger.observedAt = observedAt
-            ledger.isComplete = false
+        ledger.cursors = ledger.cursors.filter { activePaths.contains($0.key) }
+        for file in files where file.size < (ledger.cursors[file.url.path]?.offset ?? 0) {
+            ledger.cursors.removeValue(forKey: file.url.path)
         }
+        ledger.observedAt = observedAt
+        ledger.isComplete = false
 
         for file in files {
             try Task.checkCancellation()
@@ -91,13 +94,11 @@ struct CodexWindowSampler {
                 cursor.offset = processedOffset
                 ledger.cursors[path] = cursor
             }
-
-            save(ledger)
         }
 
         ledger.cursors = ledger.cursors.filter { activePaths.contains($0.key) }
         ledger.isComplete = true
-        if ledger.parseErrors == 0, ledger.observedTokens > 0 {
+        if ledgerKey == StorageKeys.codexWindowLedger, ledger.parseErrors == 0, ledger.observedTokens > 0 {
             saveLastKnownMix(ledger.mixLedger)
         }
         save(ledger)
@@ -113,55 +114,10 @@ struct CodexWindowSampler {
         return nil
     }
 
-    private func sessionFiles(since windowStartedAt: Date) -> [SessionFile] {
-        let environment = ProcessInfo.processInfo.environment
-        let codexHome = environment["CODEX_HOME"].map(URL.init(fileURLWithPath:))
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
-        let root = codexHome.appendingPathComponent("sessions", isDirectory: true)
-        let keys: Set<URLResourceKey> = [
-            .isRegularFileKey,
-            .fileSizeKey,
-            .contentModificationDateKey,
-        ]
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles]
-        ) else {
-            return []
-        }
-
-        let cutoffDay = Self.utcDayFormatter.string(from: windowStartedAt)
-        return enumerator.compactMap { item -> SessionFile? in
-            guard let url = item as? URL,
-                  url.pathExtension == "jsonl",
-                  let values = try? url.resourceValues(forKeys: keys),
-                  values.isRegularFile == true,
-                  let fileSize = values.fileSize,
-                  fileSize > 0
-            else {
-                return nil
-            }
-            let pathIsRecent = sessionPathDay(url.path).map { $0 >= cutoffDay } ?? false
-            let modifiedIsRecent = (values.contentModificationDate ?? .distantPast) >= windowStartedAt
-            guard pathIsRecent || modifiedIsRecent else { return nil }
-            return SessionFile(url: url, size: UInt64(fileSize))
-        }
-        .sorted { $0.url.path < $1.url.path }
-    }
-
-    private func sessionPathDay(_ path: String) -> String? {
-        let parts = URL(fileURLWithPath: path).pathComponents
-        guard let sessionsIndex = parts.lastIndex(of: "sessions"),
-              parts.count > sessionsIndex + 3
-        else {
-            return nil
-        }
-        let dateParts = parts[(sessionsIndex + 1)...(sessionsIndex + 3)]
-        guard dateParts.count == 3, dateParts.allSatisfy({ Int($0) != nil }) else {
-            return nil
-        }
-        return dateParts.joined(separator: "-")
+    private func sessionFiles(since windowStartedAt: Date) -> [TranscriptFile] {
+        TranscriptFile.list(in: ["sessions", "archived_sessions"].map {
+            codexHome.appendingPathComponent($0)
+        }, since: windowStartedAt)
     }
 
     private func consumeChunk(
@@ -218,10 +174,11 @@ struct CodexWindowSampler {
         let hash = parser.stableHash(event.identity)
         guard ledger.messageHashes.insert(hash).inserted else { return }
 
-        var aggregate = ledger.byModel[event.model] ?? TokenBreakdown()
+        var models = ledger.byDayAndModel[event.day] ?? [:]
+        var aggregate = models[event.model] ?? TokenBreakdown()
         aggregate.add(event.breakdown)
-        ledger.byModel[event.model] = aggregate
-        ledger.tokensByDay[event.day, default: 0] += event.breakdown.total
+        models[event.model] = aggregate
+        ledger.byDayAndModel[event.day] = models
     }
 
     private func isRelevantPrefix(_ prefix: Data.SubSequence) -> Bool {
@@ -233,10 +190,9 @@ struct CodexWindowSampler {
         resetsAt: Date,
         observedAt: Date
     ) -> CodexWindowLedger {
-        guard let data = defaults.data(forKey: StorageKeys.codexWindowLedger),
-              let ledger = try? JSONDecoder().decode(CodexWindowLedger.self, from: data),
-              abs(ledger.windowStartedAt.timeIntervalSince(windowStartedAt)) < 1,
-              abs(ledger.resetsAt.timeIntervalSince(resetsAt)) < 1
+        guard let ledger = TranscriptCache.load(CodexWindowLedger.self, key: ledgerKey),
+              abs(ledger.windowStartedAt.timeIntervalSince(windowStartedAt)) < 2,
+              abs(ledger.resetsAt.timeIntervalSince(resetsAt)) < 2
         else {
             return .empty(
                 windowStartedAt: windowStartedAt,
@@ -248,8 +204,7 @@ struct CodexWindowSampler {
     }
 
     private func save(_ ledger: CodexWindowLedger) {
-        guard let data = try? JSONEncoder().encode(ledger) else { return }
-        defaults.set(data, forKey: StorageKeys.codexWindowLedger)
+        TranscriptCache.save(ledger, key: ledgerKey)
     }
 
     private func saveLastKnownMix(_ ledger: MixLedger) {
@@ -257,18 +212,5 @@ struct CodexWindowSampler {
         defaults.set(data, forKey: StorageKeys.codexLastKnownMix)
     }
 
-    private static let utcDayFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter
-    }()
 
-}
-
-private struct SessionFile {
-    var url: URL
-    var size: UInt64
 }

@@ -31,10 +31,24 @@ enum TokenBarMain {
             currentValues[StorageKeys.snapshot] = currentValues["quotabar-lite.snapshot.v1"]
                 ?? legacyValues["quotabar-lite.snapshot.v1"]
         }
+        if currentValues[StorageKeys.priceCache] == nil,
+           let data = currentValues["tokenbar.price-cache.v4"] as? Data,
+           var cache = try? JSONDecoder().decode(PriceCache.self, from: data) {
+            cache.openAI.fetchedAt = .distantPast
+            cache.claude.fetchedAt = .distantPast
+            cache.openAI.etag = nil
+            cache.openAI.lastAttemptAt = nil
+            cache.claude.etag = nil
+            cache.claude.lastAttemptAt = nil
+            if let migrated = try? JSONEncoder().encode(cache) {
+                currentValues[StorageKeys.priceCache] = migrated
+            }
+        }
         for key in currentValues.keys where StorageKeys.isObsolete(key) {
             currentValues.removeValue(forKey: key)
         }
         defaults.setPersistentDomain(currentValues, forName: currentDomain)
+        TranscriptCache.removeObsolete()
     }
 }
 
@@ -46,8 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var refreshScheduler: NSBackgroundActivityScheduler?
     private var activityWatcher: LocalActivityWatcher?
     private var localRefreshTimer: Timer?
-    private var pendingLocalProviders: Set<ProviderScope> = []
-    private var lastLocalScanAt: [ProviderScope: Date] = [:]
+    private var claudeWindowTimer: Timer?
+    // Keyed by configuration directory, so each account refreshes on its own activity.
+    private var pendingLocalAccounts: Set<String> = []
+    private var lastLocalScanAt: [String: Date] = [:]
     private let localScanInterval: TimeInterval = 3 * 60
     private var cancellables: Set<AnyCancellable> = []
 
@@ -68,22 +84,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.statusPanel?.updateContentSize(
                     TokenBarLayout.panelSize(for: snapshot)
                 )
+                self?.scheduleNextClaudeWindowRefresh(for: snapshot)
             }
+            .store(in: &cancellables)
+
+        // Timers pause during sleep, so a reset passed while asleep is caught after wake.
+        NSWorkspace.shared.notificationCenter
+            .publisher(for: NSWorkspace.didWakeNotification)
+            .delay(for: .seconds(15), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in self?.store.refreshIfStale() }
             .store(in: &cancellables)
 
         updateStatusItems()
         store.start()
 
         if PreviewScenario.current() == nil {
-            activityWatcher = LocalActivityWatcher { [weak self] providers in
-                self?.localActivityChanged(providers)
+            activityWatcher = LocalActivityWatcher { [weak self] accounts in
+                self?.localActivityChanged(accounts)
             }
-            activityWatcher?.start()
+            store.$snapshot
+                .map { snapshot in
+                    (snapshot.additionalClaudeAccounts ?? []).map {
+                        AccountSource(provider: .claude, directory: $0.sourceDirectory)
+                    } + (snapshot.additionalCodexAccounts ?? []).map {
+                        AccountSource(provider: .codex, directory: $0.sourceDirectory)
+                    }
+                }
+                .removeDuplicates()
+                .sink { [weak self] accounts in
+                    guard let self, let watcher = activityWatcher else { return }
+                    watcher.start(accounts: accounts)
+                    // A forgotten account's activity would otherwise be retried forever.
+                    pendingLocalAccounts.formIntersection(watcher.watchedAccounts)
+                }
+                .store(in: &cancellables)
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.showStatusPanel()
-        }
+        store.$isRefreshing
+            .filter { !$0 }
+            .prefix(1)
+            .delay(for: .milliseconds(500), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in self?.showStatusPanel() }
+            .store(in: &cancellables)
 
         let scheduler = NSBackgroundActivityScheduler(
             identifier: "com.local.tokenbar.usage-refresh"
@@ -104,6 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         refreshScheduler?.invalidate()
         localRefreshTimer?.invalidate()
+        claudeWindowTimer?.invalidate()
         activityWatcher?.stop()
         statusPanel?.hide()
     }
@@ -118,10 +161,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusPanel?.show(relativeTo: usageItem)
     }
 
-    private func localActivityChanged(_ providers: Set<ProviderScope>) {
-        pendingLocalProviders.formUnion(providers)
+    private func localActivityChanged(_ accounts: Set<String>) {
+        pendingLocalAccounts.formUnion(accounts)
         let now = Date()
-        let next = providers.map {
+        let next = accounts.map {
             max(now.addingTimeInterval(20),
                 lastLocalScanAt[$0]?.addingTimeInterval(localScanInterval) ?? .distantPast)
         }.min() ?? now
@@ -142,13 +185,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func runLocalRefresh() {
         localRefreshTimer = nil
-        guard !pendingLocalProviders.isEmpty else { return }
+        guard !pendingLocalAccounts.isEmpty else { return }
         guard !store.isRefreshing else {
             scheduleLocalRefresh(after: 5)
             return
         }
         let now = Date()
-        let ready = Set(pendingLocalProviders.filter {
+        let ready = Set(pendingLocalAccounts.filter {
             now >= (lastLocalScanAt[$0]?.addingTimeInterval(localScanInterval) ?? .distantPast)
         })
         guard !ready.isEmpty else {
@@ -157,21 +200,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let attempted = store.refresh(
             force: false,
-            providers: ready,
+            accounts: ready,
             scanLocal: true
         )
-        for provider in ready { lastLocalScanAt[provider] = now }
-        pendingLocalProviders.subtract(attempted)
+        for account in ready { lastLocalScanAt[account] = now }
+        pendingLocalAccounts.subtract(attempted)
         scheduleNextPendingLocalRefresh()
     }
 
     private func scheduleNextPendingLocalRefresh() {
-        guard !pendingLocalProviders.isEmpty else { return }
-        let next = pendingLocalProviders.map {
-            max(store.nextAttemptDate(for: $0),
+        guard !pendingLocalAccounts.isEmpty else { return }
+        let next = pendingLocalAccounts.map {
+            max(store.nextAttemptDate(forAccount: $0),
                 lastLocalScanAt[$0]?.addingTimeInterval(localScanInterval) ?? .distantPast)
         }.min() ?? Date()
         scheduleLocalRefresh(after: max(5, next.timeIntervalSinceNow))
+    }
+
+    private func scheduleNextClaudeWindowRefresh(for snapshot: AppSnapshot) {
+        // Refreshing after a 5-hour reset lets the store start the next window.
+        let now = Date()
+        guard let date = ([snapshot.claude] + (snapshot.additionalClaudeAccounts ?? []).map(\.quota))
+            .compactMap({ $0.shortWindow?.resetsAt?.addingTimeInterval(60) })
+            .filter({ $0 > now })
+            .min()
+        else { return }
+        scheduleClaudeWindowRefresh(at: date)
+    }
+
+    private func scheduleClaudeWindowRefresh(at date: Date) {
+        if let timer = claudeWindowTimer {
+            guard timer.fireDate > date else { return }
+            timer.invalidate()
+        }
+        // Common modes keep the timer firing while the menu is tracking.
+        let timer = Timer(fire: date, interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.runClaudeWindowRefresh() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        claudeWindowTimer = timer
+    }
+
+    private func runClaudeWindowRefresh() {
+        claudeWindowTimer = nil
+        guard !store.isRefreshing else {
+            scheduleClaudeWindowRefresh(at: Date().addingTimeInterval(5))
+            return
+        }
+        // A rate-limit cooldown skips Claude, so retry once it ends.
+        if !store.refresh(providers: [.claude]).contains(AccountSource.primaryDirectory(for: .claude).path),
+           let retry = store.snapshot.claude.nextAllowedRefreshAt, retry > Date() {
+            scheduleClaudeWindowRefresh(at: retry)
+        }
     }
 
     private func makeStatusItem(toolTip: String) -> NSStatusItem {
@@ -183,8 +263,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatusItems() {
-        let claudePercent = mostConstrainedPercent(store.snapshot.claude)
-        let codexPercent = mostConstrainedPercent(store.snapshot.codex)
+        let snapshot = store.snapshot
+        let claudePercent = averagePercent([snapshot.claude]
+            + (snapshot.additionalClaudeAccounts ?? []).map(\.quota))
+        let codexPercent = averagePercent((snapshot.primaryCodexYields ? [] : [snapshot.codex])
+            + snapshot.visibleCodexAccounts.map(\.quota))
         switch store.snapshot.presentation {
         case .claudeOnly:
             usageItem?.button?.image = singleGaugeImage(percent: claudePercent, color: QuotaBarColor.claude)
@@ -208,8 +291,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // Accounts count equally because plan sizes are unknown, so one full account of two reads as half used.
+    private func averagePercent(_ accounts: [ProviderSnapshot]) -> Double? {
+        let percents = accounts.compactMap(mostConstrainedPercent)
+        return percents.isEmpty ? nil : percents.reduce(0, +) / Double(percents.count)
+    }
+
     private func mostConstrainedPercent(_ snapshot: ProviderSnapshot) -> Double? {
+        // Extra usage is a spending pool, not a rate-limit window.
         ([snapshot.shortWindow, snapshot.longWindow].compactMap { $0 } + snapshot.extraWindows)
+            .filter { $0.limitID != "claude:extra_usage" }
             .map(\.usedPercent)
             .max()
     }

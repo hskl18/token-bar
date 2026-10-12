@@ -5,13 +5,14 @@ A native macOS menu bar monitor for Claude Code and OpenAI Codex.
 **macOS 14+ · Swift 5.10 · MIT**
 
 <p align="center">
-  <img src="docs/screenshots/token-bar-dashboard.png" alt="Token Bar dashboard for Claude Code and Codex" width="280">
+  <img src="docs/screenshots/token-bar-dashboard.png" alt="Token Bar with two Claude and two Codex accounts, using synthetic data" width="280">
 </p>
 
 ## At a glance
 
 - 🟠 Claude quota windows and local token estimates
 - 🔵 Codex quota windows and account activity
+- 🟠🔵 Extra Claude and Codex accounts in their own quota rows
 - ⚪ Capacity-weighted combined usage
 - 🟠 Last-known values when a provider becomes stale
 - 🔒 Local aggregation without raw transcript uploads
@@ -34,6 +35,8 @@ Opening it shows the usage panel, including when the app is already running.
 To keep a copy on the Desktop, copy `build/Token Bar.app` there in Finder and double-click it.
 
 Sign in to Claude Code, Codex CLI, or Codex Desktop before refreshing Token Bar.
+Extra accounts in `~/.claude-*` and `~/.codex-*` folders appear automatically; see [Architecture](docs/ARCHITECTURE.md#accounts).
+Token Bar uses the installed Claude CLI to renew expired sign-ins and to start idle 5-hour windows; see [Claude usage](docs/CLAUDE-USAGE.md).
 Building and running the app does not require administrator access.
 macOS may request access to the user's login Keychain for Claude usage data.
 
@@ -53,6 +56,11 @@ Read the technical notes in [`docs/`](docs/README.md):
 - [Design system](docs/DESIGN.md)
 - [Subscription preview gallery](docs/SUBSCRIPTION-PREVIEWS.md)
 - [Signed distribution](docs/DISTRIBUTION.md)
+
+## Contributing
+
+Issues and pull requests are welcome; for a number that looks wrong, include the displayed value, the expected value, and a source.
+Leave out credentials, tokens, and private transcript content.
 
 ## License
 

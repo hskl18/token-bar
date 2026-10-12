@@ -48,6 +48,13 @@ struct CodexTranscriptParser {
             cursor.model = modelName(payload: payload) ?? cursor.model
             return .ignored
         }
+        // Codex logs the speed tier only in thread settings, until the next one; no tier means Standard.
+        if type == "event_msg", payload?["type"] as? String == "thread_settings_applied" {
+            if let settings = payload?["thread_settings"] as? [String: Any] {
+                cursor.serviceTier = settings["service_tier"] as? String
+            }
+            return .ignored
+        }
         guard type == "event_msg", payload?["type"] as? String == "token_count" else {
             return .ignored
         }
@@ -60,15 +67,8 @@ struct CodexTranscriptParser {
         }
         if cursor.previousTotal == total { return .ignored }
 
-        let delta: TokenTotals
-        if let lastRaw = info?["last_token_usage"] as? [String: Any],
-           let last = tokenTotals(lastRaw) {
-            delta = last
-        } else if let previous = cursor.previousTotal {
-            delta = subtract(total, previous)
-        } else {
-            delta = total
-        }
+        let lastUsage = (info?["last_token_usage"] as? [String: Any]).flatMap(tokenTotals)
+        let delta = lastUsage ?? cursor.previousTotal.map { subtract(total, $0) } ?? total
         cursor.previousTotal = total
         guard !isEmpty(delta) else { return .ignored }
 
@@ -101,8 +101,14 @@ struct CodexTranscriptParser {
         return CodexTranscriptParseResult(
             event: CodexTranscriptEvent(
                 date: date,
-                day: Self.localDayFormatter.string(from: date),
-                model: model,
+                // UTC days match the account buckets this mix prices.
+                day: TokenActivity.utcDayFormatter.string(from: date),
+                model: UsagePriceKey.make(
+                    model: model,
+                    speed: cursor.serviceTier,
+                    // Cumulative deltas can span several requests, so only per-request usage qualifies.
+                    longContext: (lastUsage?.input ?? 0) > 272_000
+                ),
                 breakdown: normalizedBreakdown(delta),
                 identity: identity
             ),
@@ -114,6 +120,7 @@ struct CodexTranscriptParser {
         prefix.range(of: Self.sessionMetaMarker) != nil
             || prefix.range(of: Self.turnContextMarker) != nil
             || prefix.range(of: Self.tokenCountMarker) != nil
+            || prefix.range(of: Self.threadSettingsMarker) != nil
     }
 
     func stableHash(_ value: String) -> UInt64 {
@@ -168,7 +175,8 @@ struct CodexTranscriptParser {
                 ?? 0,
             output: output ?? 0,
             reasoning: int64(value["reasoning_output_tokens"]) ?? 0,
-            total: total ?? 0
+            total: total ?? 0,
+            cacheWriteInput: int64(value["cache_write_input_tokens"]) ?? 0
         )
     }
 
@@ -178,7 +186,8 @@ struct CodexTranscriptParser {
             cachedInput: max(0, value.cachedInput - previous.cachedInput),
             output: max(0, value.output - previous.output),
             reasoning: max(0, value.reasoning - previous.reasoning),
-            total: max(0, value.total - previous.total)
+            total: max(0, value.total - previous.total),
+            cacheWriteInput: max(0, (value.cacheWriteInput ?? 0) - (previous.cacheWriteInput ?? 0))
         )
     }
 
@@ -191,8 +200,8 @@ struct CodexTranscriptParser {
 
     private func normalizedBreakdown(_ totals: TokenTotals) -> TokenBreakdown {
         TokenBreakdown(
-            input: max(0, totals.input - totals.cachedInput),
-            cacheCreationInput: 0,
+            input: max(0, totals.input - totals.cachedInput - (totals.cacheWriteInput ?? 0)),
+            cacheCreationInput: max(0, totals.cacheWriteInput ?? 0),
             cachedInput: max(0, totals.cachedInput),
             output: max(0, totals.output - totals.reasoning),
             reasoning: max(0, totals.reasoning)
@@ -209,11 +218,11 @@ struct CodexTranscriptParser {
         let prefix = total == delta ? "codex-token-count" : "source-wide:codex-token-count"
         let message = "\(prefix):\(logicalSessionKey):\(model):"
             + "total=\(vector(total)):delta=\(vector(delta))"
-        return total == delta ? "\(path)|\(message)" : message
+        return total == delta && logicalSessionKey == path ? "\(path)|\(message)" : message
     }
 
     private func vector(_ value: TokenTotals) -> String {
-        [value.input, value.cachedInput, value.output, value.reasoning, value.total]
+        [value.input, value.cachedInput, value.cacheWriteInput ?? 0, value.output, value.reasoning, value.total]
             .map(String.init)
             .joined(separator: ",")
     }
@@ -235,16 +244,8 @@ struct CodexTranscriptParser {
         return formatter
     }()
 
-    private static let localDayFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter
-    }()
-
     private static let sessionMetaMarker = Data(#""type":"session_meta""#.utf8)
     private static let turnContextMarker = Data(#""type":"turn_context""#.utf8)
     private static let tokenCountMarker = Data(#""type":"token_count""#.utf8)
+    private static let threadSettingsMarker = Data(#""type":"thread_settings_applied""#.utf8)
 }

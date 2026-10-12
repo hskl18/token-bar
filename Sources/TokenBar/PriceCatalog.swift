@@ -9,9 +9,9 @@ struct PriceCatalog {
 
     private let maxAge: TimeInterval = 24 * 60 * 60
     private let retryCooldown: TimeInterval = 60
-    private let openAIURL = "https://developers.openai.com/api/docs/pricing.md"
-    private let claudeURL = "https://platform.claude.com/docs/en/about-claude/pricing.md"
-    private let defaultFallbackURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+    static let openAIURL = "https://developers.openai.com/api/docs/pricing.md"
+    static let claudeURL = "https://platform.claude.com/docs/en/about-claude/pricing.md"
+    static let defaultFallbackURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -23,15 +23,33 @@ struct PriceCatalog {
     }
 
     func costLedger(for ledger: MixLedger) async -> CostLedger {
-        let observedModels = Set(ledger.byModel.keys)
+        let observedModels = Set(ledger.byModel.keys.map(UsagePriceKey.model))
         guard !observedModels.isEmpty else { return .empty }
 
         var cache = loadCache()
         cache = await refreshed(cache, requiredModels: observedModels)
         let prices = mergedPrices(from: cache)
-        return CostLedger(byDay: ledger.byDayAndModel.mapValues { models in
-            pricedMix(for: models, prices: prices)
-        })
+        let oldHistory = defaults.data(forKey: StorageKeys.priceHistory)
+        var history = oldHistory.flatMap {
+            try? JSONDecoder().decode([String: [String: ModelPrice]].self, from: $0)
+        } ?? [:]
+        var byDay: [String: CostMix] = [:]
+        for (day, models) in ledger.byDayAndModel {
+            var dayPrices = history[day] ?? [:]
+            // Tier rows resolve through the model's Standard row, so freeze both.
+            for usageKey in models.keys {
+                let rows = [UsagePriceKey.model(usageKey), usageKey].compactMap { resolvedPrice(for: $0, in: prices) }
+                for (key, resolved) in rows where dayPrices[key] == nil { dayPrices[key] = resolved }
+            }
+            history[day] = dayPrices
+            byDay[day] = pricedMix(for: models, prices: dayPrices)
+        }
+        let retainedDays = Set(history.keys.sorted().suffix(400))
+        history = history.filter { retainedDays.contains($0.key) }
+        if let data = try? JSONEncoder().encode(history), data != oldHistory {
+            defaults.set(data, forKey: StorageKeys.priceHistory)
+        }
+        return CostLedger(byDay: byDay)
     }
 
     private func pricedMix(
@@ -45,10 +63,20 @@ struct PriceCatalog {
         var unpricedTokens: Int64 = 0
 
         for (model, tokens) in models {
-            guard let price = resolvePrice(for: model, in: prices) else {
+            guard var price = resolvedPrice(for: model, in: prices)?.price else {
                 missingModels.append(model)
                 unpricedTokens += tokens.total
                 continue
+            }
+            if model.contains("|long"), let input = price.longContextInputPerToken,
+               let cached = price.longContextCachedInputPerToken,
+               let writes = price.longContextCacheCreationInputPerToken,
+               let output = price.longContextOutputPerToken {
+                price.inputPerToken = input
+                price.cachedInputPerToken = cached
+                price.cacheCreationInputPerToken = writes
+                price.outputPerToken = output
+                price.reasoningPerToken = output
             }
             let cacheCreation5m = tokens.cacheCreationInput5m ?? 0
             let cacheCreation1h = tokens.cacheCreationInput1h ?? 0
@@ -57,14 +85,15 @@ struct PriceCatalog {
                 tokens.cacheCreationInput - cacheCreation5m - cacheCreation1h
             )
             sampledTokens += tokens.total
-            sampledCost += Double(tokens.input) * price.inputPerToken
-            sampledCost += Double(cacheCreation5m + unsplitCacheCreation)
+            var cost = Double(tokens.input) * price.inputPerToken
+            cost += Double(cacheCreation5m + unsplitCacheCreation)
                 * price.cacheCreationInputPerToken
-            sampledCost += Double(cacheCreation1h)
+            cost += Double(cacheCreation1h)
                 * (price.cacheCreationInput1hPerToken ?? price.cacheCreationInputPerToken)
-            sampledCost += Double(tokens.cachedInput) * price.cachedInputPerToken
-            sampledCost += Double(tokens.output) * price.outputPerToken
-            sampledCost += Double(tokens.reasoning) * price.reasoningPerToken
+            cost += Double(tokens.cachedInput) * price.cachedInputPerToken
+            cost += Double(tokens.output) * price.outputPerToken
+            cost += Double(tokens.reasoning) * price.reasoningPerToken
+            sampledCost += cost
         }
 
         return CostMix(
@@ -86,25 +115,30 @@ struct PriceCatalog {
         async let openAI = refreshedSource(
             existing.openAI,
             requiredModels: openAIModels,
-            sourceURL: openAIURL,
+            sourceURL: Self.openAIURL,
             kind: .openAI
         )
         async let claude = refreshedSource(
             existing.claude,
             requiredModels: claudeModels,
-            sourceURL: claudeURL,
+            sourceURL: Self.claudeURL,
             kind: .claude
         )
-        async let fallback = refreshedSource(
+        let (openAIPrices, claudePrices) = await (openAI, claude)
+        let missingModels = canonicalModels.filter {
+            resolvePrice(for: $0, in: openAIPrices.models) == nil
+                && resolvePrice(for: $0, in: claudePrices.models) == nil
+        }
+        let fallback = await refreshedSource(
             existing.fallback,
-            requiredModels: canonicalModels,
+            requiredModels: missingModels,
             sourceURL: configuredFallbackURL(),
             kind: .fallback
         )
 
-        let updated = await PriceCache(
-            openAI: openAI,
-            claude: claude,
+        let updated = PriceCache(
+            openAI: openAIPrices,
+            claude: claudePrices,
             fallback: fallback
         )
         save(updated)
@@ -123,7 +157,7 @@ struct PriceCatalog {
         let missing = requiredModels.filter { resolvePrice(for: $0, in: existing.models) == nil }
         let checkedModels = Set(existing.checkedModels ?? [])
         let uncheckedMissing = Set(missing).subtracting(checkedModels)
-        let stale = Date().timeIntervalSince(existing.fetchedAt) >= maxAge
+        let stale = Date().timeIntervalSince(existing.fetchedAt) >= (kind == .fallback ? 7 * maxAge : maxAge)
         let needsRefresh = stale || sourceChanged || !uncheckedMissing.isEmpty
         let recentlyAttempted = existing.lastAttemptAt.map {
             Date().timeIntervalSince($0) < retryCooldown
@@ -184,7 +218,7 @@ struct PriceCatalog {
     private func configuredFallbackURL() -> String {
         let environment = ProcessInfo.processInfo.environment
         return environment["TOKENBAR_PRICE_URL"]
-            ?? defaultFallbackURL
+            ?? Self.defaultFallbackURL
     }
 
     private func parsedModels(
@@ -238,7 +272,18 @@ struct PriceCatalog {
     }
 
     private func parseOpenAIPrices(_ markdown: String) -> [String: ModelPrice] {
-        let rows = markdownTableRows(in: markdown, after: "### Standard pricing data")
+        var prices = openAITable(in: markdown, after: "### Standard pricing data")
+        guard prices.count >= 3 else { return [:] }
+        for (heading, speed) in [("### Fast pricing data", "|fast"), ("### Ultrafast pricing data", "|ultrafast")] {
+            for (model, price) in openAITable(in: markdown, after: heading) {
+                prices[model + speed] = price
+            }
+        }
+        return prices
+    }
+
+    private func openAITable(in markdown: String, after heading: String) -> [String: ModelPrice] {
+        let rows = markdownTableRows(in: markdown, after: heading)
         let expectedHeader = [
             "model",
             "short context input",
@@ -259,16 +304,22 @@ struct PriceCatalog {
                   let output = pricePerToken(cells[4]) else {
                 continue
             }
+            let longColumns = cells.count >= 9
+            let longInput = longColumns ? pricePerToken(cells[5]) : nil
             prices[model] = ModelPrice(
                 inputPerToken: input,
                 cacheCreationInputPerToken: pricePerToken(cells[3]) ?? input,
                 cacheCreationInput1hPerToken: nil,
                 cachedInputPerToken: pricePerToken(cells[2]) ?? input,
                 outputPerToken: output,
-                reasoningPerToken: output
+                reasoningPerToken: output,
+                longContextInputPerToken: longInput,
+                longContextCachedInputPerToken: longColumns ? pricePerToken(cells[6]) ?? longInput : nil,
+                longContextCacheCreationInputPerToken: longColumns ? pricePerToken(cells[7]) ?? longInput : nil,
+                longContextOutputPerToken: longColumns ? pricePerToken(cells[8]) : nil
             )
         }
-        return prices.count >= 3 ? prices : [:]
+        return prices
     }
 
     private func parseClaudePrices(_ markdown: String) -> [String: ModelPrice] {
@@ -303,7 +354,29 @@ struct PriceCatalog {
                 reasoningPerToken: output
             )
         }
-        return prices.count >= 3 ? prices : [:]
+        guard prices.count >= 3 else { return [:] }
+
+        // Claude applies prompt-caching multipliers on top of fast rates, so cache rates scale with input.
+        let fastRows = markdownTableRows(in: markdown, after: "### Fast mode pricing")
+        guard fastRows.count > 1, header(fastRows[0], startsWith: ["model", "input", "output"]) else {
+            return prices
+        }
+        for cells in fastRows.dropFirst() where cells.count >= 3 && !isTableSeparator(cells) {
+            guard let input = pricePerToken(cells[1]), let output = pricePerToken(cells[2]) else { continue }
+            for name in cells[0].split(separator: "/") {
+                let model = slugify(plainModelName(String(name)))
+                guard var price = prices[model] else { continue }
+                let ratio = input / price.inputPerToken
+                price.cacheCreationInputPerToken *= ratio
+                price.cacheCreationInput1hPerToken = price.cacheCreationInput1hPerToken.map { $0 * ratio }
+                price.cachedInputPerToken *= ratio
+                price.inputPerToken = input
+                price.outputPerToken = output
+                price.reasoningPerToken = output
+                prices[model + "|fast"] = price
+            }
+        }
+        return prices
     }
 
     private func header(_ cells: [String], startsWith expected: [String]) -> Bool {
@@ -410,17 +483,29 @@ struct PriceCatalog {
         )
     }
 
+    // A speed tier without a published rate stays unpriced rather than borrowing the Standard rate.
+    private func resolvedPrice(
+        for usageKey: String,
+        in prices: [String: ModelPrice]
+    ) -> (key: String, price: ModelPrice)? {
+        guard let base = priceKey(for: UsagePriceKey.model(usageKey), in: prices) else { return nil }
+        let key = base + UsagePriceKey.speed(usageKey)
+        return prices[key].map { (key, $0) }
+    }
+
     private func resolvePrice(for model: String, in prices: [String: ModelPrice]) -> ModelPrice? {
+        priceKey(for: model, in: prices).flatMap { prices[$0] }
+    }
+
+    private func priceKey(for model: String, in prices: [String: ModelPrice]) -> String? {
         let canonical = normalize(model)
-        if let exact = prices[canonical] { return exact }
+        if prices[canonical] != nil { return canonical }
         return prices.keys
             .filter { key in
                 canonical.hasPrefix("\(key)-")
                     && isVersionSuffix(String(canonical.dropFirst(key.count + 1)))
             }
-            .sorted { $0.count > $1.count }
-            .first
-            .flatMap { prices[$0] }
+            .max { $0.count < $1.count }
     }
 
     private func isVersionSuffix(_ value: String) -> Bool {

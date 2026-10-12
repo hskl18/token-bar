@@ -5,6 +5,7 @@ struct WeeklyCapacityEstimator {
         history: inout WeeklyCapacityHistory,
         window: LimitWindow,
         observedTokens: Int64,
+        observedCostUSD: Double,
         observedAt: Date,
         source: String
     ) -> WeeklyTokenCapacityEstimate? {
@@ -12,7 +13,8 @@ struct WeeklyCapacityEstimator {
               let resetsAt = window.resetsAt,
               minutes == 7 * 24 * 60,
               window.usedPercent.isFinite,
-              window.usedPercent >= 0
+              window.usedPercent >= 0,
+              observedCostUSD.isFinite, observedCostUSD > 0, observedTokens > 0
         else {
             return nil
         }
@@ -28,7 +30,8 @@ struct WeeklyCapacityEstimator {
             observedTokens: observedTokens,
             equivalentTokens: window.usedPercent > 0
                 ? Double(observedTokens) * 100 / window.usedPercent : 0,
-            source: source
+            source: source,
+            equivalentValueUSD: window.usedPercent > 0 ? observedCostUSD * 100 / window.usedPercent : nil
         )
 
         // Match the account baseline's two-second tolerance. Exact timestamp keys
@@ -64,45 +67,46 @@ struct WeeklyCapacityEstimator {
             guard !sameWindow(prior, sample),
                   prior.source == source,
                   prior.usedPercent >= 10,
-                  prior.equivalentTokens.isFinite,
-                  prior.equivalentTokens > 0
+                  let value = prior.equivalentValueUSD,
+                  value.isFinite, value > 0
             else {
                 return nil
             }
-            return prior.equivalentTokens
+            return value
         }
         let prior = robustCenter(priorValues)
         let current = history.samples.first(where: {
             sameWindow($0, sample)
         }).flatMap { sample in
-            sample.usedPercent >= 3 ? sample.equivalentTokens : nil
+            sample.usedPercent >= 3 ? sample.equivalentValueUSD : nil
         }
 
-        let equivalentTokens: Double?
+        let equivalentValueUSD: Double?
         switch (prior, current) {
         case let (.some(prior), .some(current)):
             let currentWeight = min(1, max(0.1, window.usedPercent / 50))
-            equivalentTokens = exp(
+            equivalentValueUSD = exp(
                 log(prior) * (1 - currentWeight) + log(current) * currentWeight
             )
         case let (.some(prior), .none):
-            equivalentTokens = prior
+            equivalentValueUSD = prior
         case let (.none, .some(current)):
-            equivalentTokens = current
+            equivalentValueUSD = current
         case (.none, .none):
-            equivalentTokens = nil
+            equivalentValueUSD = nil
         }
 
-        guard let equivalentTokens,
-              equivalentTokens.isFinite,
-              equivalentTokens > 0
+        guard let equivalentValueUSD,
+              equivalentValueUSD.isFinite,
+              equivalentValueUSD > 0
         else {
             return nil
         }
         return WeeklyTokenCapacityEstimate(
             usedPercent: window.usedPercent,
             observedTokens: observedTokens,
-            equivalentTokens: equivalentTokens
+            equivalentTokens: equivalentValueUSD * Double(observedTokens) / observedCostUSD,
+            equivalentValueUSD: equivalentValueUSD
         )
     }
 
