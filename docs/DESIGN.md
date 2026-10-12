@@ -23,6 +23,7 @@ macOS 14 and 15 use Material with the same spacing and corner hierarchy.
 
 Quota rows are titled by account folder, such as `Claude-work · Weekly`, and show the full source path on hover.
 All 5-hour rows come first, then all Weekly rows, keeping account order within each group.
+Provider headers weight each listed account's Weekly percentage by its estimated weekly tokens.
 Hovering over a yellow footer time lists each account's errors once.
 
 The menu bar gauge uses rounded arcs, a transparent background, and the same 35-degree rotation as the app mark.

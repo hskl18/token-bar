@@ -214,6 +214,15 @@ final class TokenBarStore: ObservableObject {
                 additionalClaude, profiles: claudeAccountsToRefresh, at: attemptedAt
             ).map(Optional.init)
             startClaudeWindows(idleClaudeProfiles)
+            for profile in claudeAccountsToRefresh {
+                guard let quota = snapshot.additionalClaudeAccounts?.first(where: { $0.id == profile.id })?.quota
+                else { continue }
+                let weeklyValue = await profileWeeklyValue(.claude, quota: quota, directory: profile.configDirectory)
+                guard !Task.isCancelled, refreshGeneration == generation else { return }
+                if let index = snapshot.additionalClaudeAccounts?.firstIndex(where: { $0.id == profile.id }) {
+                    snapshot.additionalClaudeAccounts?[index].weeklyValue = weeklyValue
+                }
+            }
             for (id, result) in additionalCodex {
                 guard let index = snapshot.additionalCodexAccounts?.firstIndex(where: { $0.id == id }),
                       let profile = codexAccountsToRefresh.first(where: { $0.id == id })
@@ -221,7 +230,7 @@ final class TokenBarStore: ObservableObject {
                 applyCodexAccountResult(result, at: index, date: attemptedAt)
                 guard let account = snapshot.additionalCodexAccounts?[index] else { continue }
                 let weeklyValue = sameReset(weeklyWindow(in: account.quota)?.resetsAt, account.invalidatedReset)
-                    ? nil : await codexProfileWeeklyValue(quota: account.quota, directory: profile.configDirectory)
+                    ? nil : await profileWeeklyValue(.codex, quota: account.quota, directory: profile.configDirectory)
                 guard !Task.isCancelled, refreshGeneration == generation else { return }
                 if let currentIndex = snapshot.additionalCodexAccounts?.firstIndex(where: { $0.id == id }) {
                     snapshot.additionalCodexAccounts?[currentIndex].weeklyValue = weeklyValue
@@ -409,11 +418,42 @@ final class TokenBarStore: ObservableObject {
     }
 
     func weeklyValues(for provider: ProviderScope) -> [WeeklyValueEstimate] {
+        weeklyEstimates(for: provider).map(\.estimate)
+    }
+
+    /// Weekly percentage weighted by each account's estimated weekly tokens.
+    /// An account without an estimate takes its provider's mean weight; with none, accounts count equally.
+    func weeklyPercent(for provider: ProviderScope) -> Double? {
+        var used = 0.0
+        var total = 0.0
+        for scope in provider == .overview ? [ProviderScope.claude, .codex] : [provider] {
+            let estimates = weeklyEstimates(for: scope)
+            let rows: [(percent: Double, tokens: Double?)] = snapshot.accountRows(for: scope).compactMap { account, quota in
+                let tokens = estimates.first { $0.account == account }?.estimate.equivalentTokens
+                return quota.weeklyPercent.map { ($0, tokens.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }) }
+            }
+            let known = rows.compactMap(\.tokens)
+            // All compares the providers' capacities, so each needs at least one estimate.
+            if provider == .overview, known.isEmpty { return nil }
+            let fallback = known.isEmpty ? 1 : known.reduce(0, +) / Double(known.count)
+            for row in rows {
+                used += (row.tokens ?? fallback) * row.percent
+                total += row.tokens ?? fallback
+            }
+        }
+        return total > 0 ? min(100, max(0, used / total)) : nil
+    }
+
+    /// Current weekly estimates, one per confirmed login, keyed like `AppSnapshot.accountRows`.
+    private func weeklyEstimates(for provider: ProviderScope) -> [(account: String?, estimate: WeeklyValueEstimate)] {
         switch provider {
         case .overview:
             return []
         case .claude:
-            return [snapshot.claudeWeeklyValue].compactMap { $0 }
+            return [snapshot.claudeWeeklyValue].compactMap { $0 }.map { (snapshot.claudeAccountID, $0) }
+                + (snapshot.additionalClaudeAccounts ?? []).compactMap { account in
+                    currentEstimate(account.weeklyValue, quota: account.quota).map { (account.id, $0) }
+                }
         case .codex:
             // Choose estimates independently of quota-row visibility, one per confirmed account.
             let candidates = [(snapshot.codexAccountID, snapshot.codex, snapshot.codexWeeklyValue)]
@@ -428,10 +468,8 @@ final class TokenBarStore: ObservableObject {
             var seen = Set<String>()
             return candidates.enumerated().compactMap { index, candidate in
                 let (accountID, quota, cached) = candidate
-                guard var estimate = cached, !quota.isStale,
-                      let window = weeklyWindow(in: quota),
-                      let reset = window.resetsAt, reset > Date(),
-                      window.usedPercent >= 3, estimate.usedPercent == window.usedPercent,
+                guard var estimate = currentEstimate(cached, quota: quota),
+                      let reset = weeklyWindow(in: quota)?.resetsAt,
                       !invalidated.contains("\(accountID ?? ""):\(Int(reset.timeIntervalSince1970))"),
                       accountID.map({ seen.insert($0).inserted }) ?? true
                 else { return nil }
@@ -440,9 +478,18 @@ final class TokenBarStore: ObservableObject {
                     estimate.observedCostUSD += imageCost
                     estimate.equivalentValueUSD += imageCost * 100 / estimate.usedPercent
                 }
-                return estimate
+                return (accountID, estimate)
             }
         }
+    }
+
+    // A cached estimate counts only while it still describes the account's live weekly window.
+    private func currentEstimate(_ estimate: WeeklyValueEstimate?, quota: ProviderSnapshot) -> WeeklyValueEstimate? {
+        guard let estimate, !quota.isStale, let window = weeklyWindow(in: quota),
+              let reset = window.resetsAt, reset > Date(),
+              window.usedPercent >= 3, estimate.usedPercent == window.usedPercent
+        else { return nil }
+        return estimate
     }
 
     func imageCostHelp(for provider: ProviderScope, period: ActivityPeriod) -> String {
@@ -474,7 +521,7 @@ final class TokenBarStore: ObservableObject {
         let base = provider == .codex
             ? "Sum of available account projections. Integer quota percentages, speed modes"
                 + " and other devices can affect accuracy."
-            : "API-equivalent weekly projection smoothed in dollars."
+            : "Sum of available account projections; the primary account's is smoothed in dollars."
                 + " Proportionality to subscription quota is an assumption."
         guard provider == .codex, snapshot.codexWeeklyValue != nil, !snapshot.codex.isStale,
               let usage = snapshot.imageGenerationUsage,
@@ -635,7 +682,7 @@ final class TokenBarStore: ObservableObject {
             )
             return
         }
-        let capacity = currentCodexCapacity(window: window, observedTokens: observedTokens)
+        let capacity = currentCapacity(window: window, observedTokens: observedTokens)
         if let capacity {
             snapshot.codexWeeklyCapacity = capacity
             snapshot.codexWeeklyEstimateSource = .accountLifetime
@@ -688,7 +735,7 @@ final class TokenBarStore: ObservableObject {
             return
         }
 
-        let capacity = currentCodexCapacity(window: window, observedTokens: ledger.observedTokens)
+        let capacity = currentCapacity(window: window, observedTokens: ledger.observedTokens)
         if let capacity {
             snapshot.codexWeeklyCapacity = capacity
             snapshot.codexWeeklyEstimateSource = .localWindowFallback
@@ -803,22 +850,32 @@ final class TokenBarStore: ObservableObject {
         snapshot.additionalCodexAccounts?[index] = account
     }
 
-    private func codexProfileWeeklyValue(quota: ProviderSnapshot, directory: URL) async -> WeeklyValueEstimate? {
+    /// An extra account's estimate from its own current-window records, without cross-window smoothing.
+    private func profileWeeklyValue(
+        _ provider: ProviderScope, quota: ProviderSnapshot, directory: URL
+    ) async -> WeeklyValueEstimate? {
         guard !quota.isStale, let window = weeklyWindow(in: quota), window.usedPercent >= 3,
-              let minutes = window.windowMinutes, let reset = window.resetsAt, reset > Date(),
-              let ledger = try? await CodexWindowSampler(codexHome: directory).update(
-                windowStartedAt: reset.addingTimeInterval(-Double(minutes) * 60), resetsAt: reset
-              ), ledger.isComplete, ledger.parseErrors == 0, ledger.observedTokens > 0
+              let minutes = window.windowMinutes, let reset = window.resetsAt, reset > Date()
         else { return nil }
-        let mix = await PriceCatalog().costMix(for: ledger.mixLedger)
-        if case let .available(estimate) = weeklyValueEstimate(
-            capacity: currentCodexCapacity(window: window, observedTokens: ledger.observedTokens),
-            observedTokens: ledger.observedTokens, costMix: mix, requiresExactTokenMatch: true
-        ) { return estimate }
-        return nil
+        let start = reset.addingTimeInterval(-Double(minutes) * 60)
+        let ledger: (mix: MixLedger, tokens: Int64)?
+        if provider == .claude {
+            ledger = (try? await ClaudeWindowSampler(configDirectory: directory).update(windowStartedAt: start, resetsAt: reset))
+                .flatMap { $0.isComplete && $0.parseErrors == 0 ? ($0.mixLedger, $0.observedTokens) : nil }
+        } else {
+            ledger = (try? await CodexWindowSampler(codexHome: directory).update(windowStartedAt: start, resetsAt: reset))
+                .flatMap { $0.isComplete && $0.parseErrors == 0 ? ($0.mixLedger, $0.observedTokens) : nil }
+        }
+        guard let ledger, ledger.tokens > 0 else { return nil }
+        let mix = await PriceCatalog().costMix(for: ledger.mix)
+        guard case let .available(estimate) = weeklyValueEstimate(
+            capacity: currentCapacity(window: window, observedTokens: ledger.tokens),
+            observedTokens: ledger.tokens, costMix: mix, requiresExactTokenMatch: true
+        ) else { return nil }
+        return estimate
     }
 
-    private func currentCodexCapacity(
+    private func currentCapacity(
         window: LimitWindow,
         observedTokens: Int64
     ) -> WeeklyTokenCapacityEstimate? {
@@ -1019,7 +1076,8 @@ final class TokenBarStore: ObservableObject {
             ClaudeAccountSnapshot(
                 id: profile.id, name: profile.name,
                 sourceDirectory: profile.configDirectory.path,
-                quota: previousClaude.first(where: { $0.id == profile.id })?.quota ?? .empty
+                quota: previousClaude.first(where: { $0.id == profile.id })?.quota ?? .empty,
+                weeklyValue: previousClaude.first(where: { $0.id == profile.id })?.weeklyValue
             )
         }
         next.additionalClaudeAccounts = claudeAccounts.isEmpty ? nil : claudeAccounts

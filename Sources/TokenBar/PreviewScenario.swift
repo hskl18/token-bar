@@ -122,6 +122,13 @@ enum PreviewScenario: String {
                     error: nil,
                     lastSuccessAt: now.addingTimeInterval(-12),
                     stale: false
+                ),
+                weeklyValue: WeeklyValueEstimate(
+                    usedPercent: 34,
+                    observedTokens: 306_000_000,
+                    observedCostUSD: 207.40,
+                    equivalentTokens: 900_000_000,
+                    equivalentValueUSD: 610
                 )
             )]
             snapshot.additionalCodexAccounts = [CodexAccountSnapshot(

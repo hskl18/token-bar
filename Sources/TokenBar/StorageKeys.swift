@@ -23,13 +23,16 @@ enum StorageKeys {
         imageGenerationUsage,
     ]
 
-    static func codexProfileWindowLedger(directory: String) -> String {
-        codexWindowLedger + "." + directory
+    static let profileWindowLedgers = [claudeWindowLedger, codexWindowLedger]
+
+    /// An extra account's current-window ledger: a profile ledger prefix plus its directory.
+    static func profileWindowLedger(_ base: String, directory: String) -> String {
+        base + "." + directory
     }
 
     static func isObsolete(_ key: String) -> Bool {
         (key.hasPrefix("tokenbar.") || key.hasPrefix("quotabar-lite."))
             && !active.contains(key)
-            && !key.hasPrefix(codexWindowLedger + ".")
+            && !profileWindowLedgers.contains { key.hasPrefix($0 + ".") }
     }
 }
