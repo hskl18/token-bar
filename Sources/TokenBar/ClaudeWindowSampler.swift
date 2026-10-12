@@ -3,6 +3,15 @@ import Foundation
 struct ClaudeWindowSampler {
     private let readChunkBytes = 1024 * 1024
     private let lineParser = ClaudeMixSampler()
+    private let configDirectory: URL
+    private let ledgerKey: String
+
+    init(configDirectory: URL? = nil) {
+        self.configDirectory = configDirectory ?? AccountSource.primaryDirectory(for: .claude)
+        ledgerKey = configDirectory.map {
+            StorageKeys.profileWindowLedger(StorageKeys.claudeWindowLedger, directory: $0.path)
+        } ?? StorageKeys.claudeWindowLedger
+    }
 
     func update(windowStartedAt: Date, resetsAt: Date) async throws -> ClaudeWindowLedger {
         let scan = Task.detached(priority: .utility) {
@@ -80,8 +89,7 @@ struct ClaudeWindowSampler {
     }
 
     private func sessionFiles(since windowStartedAt: Date) -> [TranscriptFile] {
-        let root = AccountSource.primaryDirectory(for: .claude).appendingPathComponent("projects")
-        return TranscriptFile.list(in: [root], since: windowStartedAt)
+        TranscriptFile.list(in: [configDirectory.appendingPathComponent("projects")], since: windowStartedAt)
     }
 
     private func consumeChunk(
@@ -158,7 +166,7 @@ struct ClaudeWindowSampler {
         observedAt: Date
     ) -> ClaudeWindowLedger {
         guard let ledger = TranscriptCache.load(
-                ClaudeWindowLedger.self, key: StorageKeys.claudeWindowLedger
+                ClaudeWindowLedger.self, key: ledgerKey
               ),
               abs(ledger.windowStartedAt.timeIntervalSince(windowStartedAt)) < 2,
               abs(ledger.resetsAt.timeIntervalSince(resetsAt)) < 2
@@ -173,7 +181,7 @@ struct ClaudeWindowSampler {
     }
 
     private func save(_ ledger: ClaudeWindowLedger) {
-        TranscriptCache.save(ledger, key: StorageKeys.claudeWindowLedger)
+        TranscriptCache.save(ledger, key: ledgerKey)
     }
 
     private static let dayFormatter: DateFormatter = {

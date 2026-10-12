@@ -26,7 +26,7 @@ The Claude fixture uses those two windows.
 
 Preview state: `multi-account`.
 Two synthetic folders, `~/.claude-work` and `~/.codex-work`, sit beside the primary Claude and Pro accounts.
-The activity cards cover the primary accounts, and the Codex header adds both accounts' weekly estimates.
+The activity cards cover the primary accounts, and each provider header adds both accounts' weekly estimates.
 The README uses this capture.
 
 ![Two Claude and two Codex accounts, using synthetic data](screenshots/token-bar-dashboard.png)

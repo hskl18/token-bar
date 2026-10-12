@@ -264,10 +264,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusItems() {
         let snapshot = store.snapshot
-        let claudePercent = averagePercent([snapshot.claude]
-            + (snapshot.additionalClaudeAccounts ?? []).map(\.quota))
-        let codexPercent = averagePercent((snapshot.primaryCodexYields ? [] : [snapshot.codex])
-            + snapshot.visibleCodexAccounts.map(\.quota))
+        let claudePercent = averagePercent(snapshot.accountRows(for: .claude).map(\.quota))
+        let codexPercent = averagePercent(snapshot.accountRows(for: .codex).map(\.quota))
         switch store.snapshot.presentation {
         case .claudeOnly:
             usageItem?.button?.image = singleGaugeImage(percent: claudePercent, color: QuotaBarColor.claude)

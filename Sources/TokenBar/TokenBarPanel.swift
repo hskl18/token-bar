@@ -246,12 +246,8 @@ private struct UsageActivityGroup: View {
     private var percent: String {
         let value: Double?
         switch provider {
-        case .overview:
-            value = store.snapshot.combinedCapacityPercent
-        case .claude:
-            value = store.snapshot.claude.weeklyPercent
-        case .codex:
-            value = store.snapshot.codex.weeklyPercent
+        case .overview, .claude, .codex:
+            value = store.weeklyPercent(for: provider)
         }
         return value.map { "\(Int($0.rounded()))%" } ?? "--"
     }

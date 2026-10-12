@@ -6,11 +6,12 @@ enum TranscriptCache {
         .appendingPathComponent("Token Bar/Ledgers", isDirectory: true)
 
     private static func url(for key: String) -> URL {
-        guard key.hasPrefix(StorageKeys.codexWindowLedger + ".") else {
+        guard let base = StorageKeys.profileWindowLedgers.first(where: { key.hasPrefix($0 + ".") }) else {
             return directory.appendingPathComponent(key).appendingPathExtension("json")
         }
+        // Profile keys contain a directory path, which cannot be a file name.
         let digest = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
-        let name = StorageKeys.codexWindowLedger + "." + digest
+        let name = base + "." + digest
         return directory.appendingPathComponent(name).appendingPathExtension("json")
     }
 

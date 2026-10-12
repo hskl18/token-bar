@@ -48,7 +48,7 @@ Claude Code writes assistant usage records under:
 ```
 
 Token Bar reads those files in 1 MB chunks on utility tasks.
-Activity cards use only this primary history; extra accounts show quota.
+Activity cards use only this primary history; an extra account's own `projects` folder supplies just its weekly estimate.
 The first scan backfills the available calendar year.
 Later scans read bytes appended after each saved cursor.
 

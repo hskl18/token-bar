@@ -69,7 +69,8 @@ A falling weekly percentage within one reset window invalidates that window's pr
 It does not multiply a previous window's token capacity by the current model mix; quota consumption can change when the model mix changes.
 If the account counter has not increased or still trails a complete local weekly ledger, Codex uses that local ledger.
 The estimate stays unavailable without a current-window sample or priced model mix, instead of preserving a stale dollar amount.
-With several Codex accounts, the header sums each account's available estimate, counting the same login once.
+With several accounts, a provider header sums each account's available estimate, counting the same login once.
+Extra accounts project only their own current-window records, without the primary Claude account's smoothing.
 
 Claude uses available local records inside the official 7-day interval.
 Its current-window observations become eligible at 3% used.
@@ -114,9 +115,12 @@ Claude and Codex can have different weekly capacities, so Token Bar uses a weigh
 
 ```text
 All percent =
-  sum(provider API-dollar capacity × provider weekly percent)
-  / sum(provider API-dollar capacity)
+  sum(account estimated weekly tokens × account weekly percent)
+  / sum(account estimated weekly tokens)
 ```
+
+The Claude and Codex headers apply the same weighting to their own accounts.
+An account without an estimate takes its provider's mean weight, and a provider without any estimate weights its accounts equally.
 
 All is an app-defined weighted estimate, not a provider-issued shared quota.
 All remains unavailable until both providers have usable capacity evidence.

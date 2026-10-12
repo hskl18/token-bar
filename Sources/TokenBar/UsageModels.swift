@@ -132,6 +132,7 @@ struct ClaudeAccountSnapshot: Codable, Hashable, Identifiable {
     var name: String
     var sourceDirectory: String
     var quota: ProviderSnapshot
+    var weeklyValue: WeeklyValueEstimate? = nil
 }
 
 struct CodexAccountSnapshot: Codable, Hashable, Identifiable {
@@ -491,34 +492,17 @@ struct AppSnapshot: Codable, Hashable {
         updatedAt: nil
     )
 
-    var combinedCapacityPercent: Double? {
-        let providers: [(ProviderSnapshot, Double?)] = [
-            (
-                claude,
-                claudeWeeklyValue?.equivalentValueUSD
-            ),
-            (
-                codex,
-                codexWeeklyValue?.equivalentValueUSD
-            ),
-        ]
-
-        var usedValue = 0.0
-        var capacityValue = 0.0
-        for (provider, capacity) in providers {
-            guard let capacity,
-                  capacity.isFinite,
-                  capacity > 0,
-                  let percent = provider.weeklyPercent
-            else {
-                return nil
-            }
-            usedValue += capacity * percent / 100
-            capacityValue += capacity
+    /// The accounts shown as quota rows, primary first, keyed like their weekly estimates.
+    func accountRows(for provider: ProviderScope) -> [(account: String?, quota: ProviderSnapshot)] {
+        switch provider {
+        case .claude:
+            [(claudeAccountID, claude)] + (additionalClaudeAccounts ?? []).map { ($0.id, $0.quota) }
+        case .codex:
+            (primaryCodexYields ? [] : [(codexAccountID, codex)])
+                + visibleCodexAccounts.map { ($0.accountID ?? $0.id, $0.quota) }
+        case .overview:
+            []
         }
-
-        guard capacityValue > 0 else { return nil }
-        return min(100, max(0, usedValue / capacityValue * 100))
     }
 
     var presentation: ProviderPresentation {

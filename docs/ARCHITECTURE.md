@@ -36,7 +36,7 @@ Extra accounts come from `~/.claude-*` and `~/.codex-*` folders that contain a k
 Discovery lists only the home folder's top level; it does not search deeper or read unrelated files.
 Each Codex account runs its own app-server child with `CODEX_HOME` set, inherited credential variables removed, and analytics disabled.
 Folders the server reports as the same login share one quota request and appear once, preferring a fresh reading.
-Extra accounts add quota rows and, for Codex, a weekly estimate from their own local sessions; activity cards stay on the primary accounts.
+Extra accounts add quota rows and a weekly estimate from their own local sessions; activity cards stay on the primary accounts.
 
 The presentation layer derives one of four states from displayable provider data: none, Claude-only, Codex-only, or both.
 Only the dual-provider state renders All, and each state has its own compact panel height.
@@ -44,7 +44,7 @@ Both providers show every returned quota window, and the panel grows for extra r
 The UI lists 5-hour rows, then Weekly rows, then any others, keeping account order and the main Codex bucket first.
 The parser retains the server's `limitName` for presentation.
 A missing 5-hour window is never inferred from the plan name; Plus, Pro, and future plans follow the account response.
-Provider headers and combined capacity continue to use the weekly percentage.
+Provider headers and All weight each account's weekly percentage by its estimated weekly tokens; see [combined percentage](PRICING.md#combined-percentage).
 
 The status item owns a native `NSMenu` containing the SwiftUI view.
 AppKit handles menu tracking and dismissal, and the app refreshes stale data when the menu opens.
