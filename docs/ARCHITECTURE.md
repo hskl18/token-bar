@@ -17,7 +17,7 @@ Official prices + fallback ─ PriceCatalog ─ CostLedger ──┘
 
 `ProviderSnapshot` contains official percentages, reset times, connection state, cooldowns, and freshness.
 Extra accounts carry their own `ProviderSnapshot`, keyed by Claude account and organization or by Codex configuration directory.
-`TokenActivity` contains Claude local-day totals and Codex account totals by UTC day.
+`TokenActivity` contains Claude local-day totals and Codex account totals by UTC day; extra Codex accounts keep their own with their folder's `CostLedger`.
 `CostLedger` contains day-specific local model and token-category prices.
 Claude's `WeeklyCapacityHistory` contains a bounded set of derived 7-day capacity observations.
 `ImageGenerationUsage` contains saved-file-based estimates, separate from provider token activity.

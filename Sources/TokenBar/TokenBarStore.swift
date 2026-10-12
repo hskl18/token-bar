@@ -13,6 +13,8 @@ final class TokenBarStore: ObservableObject {
     private var refreshGeneration = 0
     private var profileSyncAt: Date?
     private var claudeProfiles: [ClaudeAccountProfile] = []
+    // Every extra Claude folder counts toward Claude totals, even one that repeats a login.
+    private var claudeDirectories: [URL] = []
     private var codexProfiles: [CodexAccountProfile] = []
     private let environmentSources: [AccountSource]
 
@@ -88,7 +90,8 @@ final class TokenBarStore: ObservableObject {
             return includes(.codex, profile.configDirectory) && shouldAttempt(quota, force: force, at: attemptedAt)
         }
         let shouldScanCodex = scanCodex && (scanLocal || shouldRefreshCodex)
-        let shouldScanClaude = scanClaude && (scanLocal || shouldRefreshClaude)
+        let shouldScanClaude = ([claudeHome] + claudeDirectories).contains { includes(.claude, $0) }
+            && (scanLocal || shouldRefreshClaude || !claudeAccountsToRefresh.isEmpty)
         guard shouldScanCodex || shouldScanClaude
                 || !claudeAccountsToRefresh.isEmpty || !codexAccountsToRefresh.isEmpty
         else {
@@ -139,7 +142,7 @@ final class TokenBarStore: ObservableObject {
             async let additionalClaudeResults = fetchClaudeAccounts(claudeAccountsToRefresh)
             async let additionalCodexResults = fetchCodexAccounts(codexAccountsToRefresh, readings: codexReadings)
             async let claudeLedgerResult: ClaudeUsageLedger? = shouldScanClaude
-                ? ClaudeMixSampler().update() : nil
+                ? ClaudeMixSampler(configDirectories: [claudeHome] + claudeDirectories).update() : nil
             async let codexUsageLedgerResult: CodexUsageLedger? = shouldScanCodex
                 ? CodexMixSampler().update() : nil
             async let imageUsageResult: ImageGenerationUsage? = shouldScanCodex
@@ -231,9 +234,12 @@ final class TokenBarStore: ObservableObject {
                 guard let account = snapshot.additionalCodexAccounts?[index] else { continue }
                 let weeklyValue = sameReset(weeklyWindow(in: account.quota)?.resetsAt, account.invalidatedReset)
                     ? nil : await profileWeeklyValue(.codex, quota: account.quota, directory: profile.configDirectory)
+                let usage = await CodexMixSampler(codexHome: profile.configDirectory).update()
+                let costLedger = await PriceCatalog().costLedger(for: usage.mixLedger)
                 guard !Task.isCancelled, refreshGeneration == generation else { return }
                 if let currentIndex = snapshot.additionalCodexAccounts?.firstIndex(where: { $0.id == id }) {
                     snapshot.additionalCodexAccounts?[currentIndex].weeklyValue = weeklyValue
+                    if !costLedger.byDay.isEmpty { snapshot.additionalCodexAccounts?[currentIndex].costLedger = costLedger }
                 }
             }
 
@@ -382,7 +388,9 @@ final class TokenBarStore: ObservableObject {
     }
 
     func tokens(for provider: ProviderScope, period: ActivityPeriod) -> Int64 {
-        tokenActivity(for: provider).tokens(in: period.interval())
+        let interval = period.interval()
+        guard provider == .codex else { return tokenActivity(for: provider).tokens(in: interval) }
+        return codexUsage.reduce(0) { $0 + $1.activity.tokens(in: interval) }
     }
 
     func estimatedCost(for provider: ProviderScope, period: ActivityPeriod) -> Double? {
@@ -396,15 +404,36 @@ final class TokenBarStore: ObservableObject {
         return codexCost(in: interval).usd.map { $0 + imageCost }
     }
 
+    // Each Codex login once: the primary account, then extra accounts with a different account ID.
+    private var codexUsage: [(activity: TokenActivity, ledger: CostLedger?)] {
+        var seen = Set([snapshot.codexAccountID].compactMap { $0 })
+        return [(snapshot.tokenActivity, snapshot.codexCostLedger)]
+            + (snapshot.additionalCodexAccounts ?? []).compactMap { account in
+                guard let activity = account.tokenActivity, let id = account.accountID,
+                      seen.insert(id).inserted else { return nil }
+                return (activity, account.costLedger)
+            }
+    }
+
+    // A period's dollars need every account priced, so one unpriced account hides the total.
+    private func codexCost(in interval: DateInterval) -> (usd: Double?, unmatchedTokens: Int64) {
+        codexUsage.reduce((usd: 0, unmatchedTokens: 0)) { total, usage in
+            let cost = codexCost(of: usage.activity, ledger: usage.ledger, in: interval)
+            return (total.usd.flatMap { sum in cost.usd.map { sum + $0 } }, total.unmatchedTokens + cost.unmatchedTokens)
+        }
+    }
+
     // The account reports no models, so each UTC day uses that day's local mix and days without one
     // use the period's average rate; unknown models still need 99.9% coverage across the period.
-    private func codexCost(in interval: DateInterval) -> (usd: Double?, unmatchedTokens: Int64) {
-        let buckets = snapshot.tokenActivity.buckets(in: interval)
+    private func codexCost(
+        of activity: TokenActivity, ledger: CostLedger?, in interval: DateInterval
+    ) -> (usd: Double?, unmatchedTokens: Int64) {
+        let buckets = activity.buckets(in: interval)
         var usd = 0.0
         var priced: Int64 = 0
         var unmatched: Int64 = 0
         for bucket in buckets {
-            if let rate = snapshot.codexCostLedger?.byDay[bucket.startDate]?.usdPerToken {
+            if let rate = ledger?.byDay[bucket.startDate]?.usdPerToken {
                 usd += Double(bucket.tokens) * rate
                 priced += bucket.tokens
             } else {
@@ -412,7 +441,7 @@ final class TokenBarStore: ObservableObject {
             }
         }
         guard priced + unmatched > 0 else { return (0, 0) }
-        let mixes = buckets.compactMap { snapshot.codexCostLedger?.byDay[$0.startDate] }
+        let mixes = buckets.compactMap { ledger?.byDay[$0.startDate] }
         guard priced > 0, CostMix.merged(mixes).hasPricedCoverage else { return (nil, unmatched) }
         return (usd + Double(unmatched) * usd / Double(priced), unmatched)
     }
@@ -496,8 +525,8 @@ final class TokenBarStore: ObservableObject {
         var utc = Calendar(identifier: .gregorian)
         utc.timeZone = .gmt
         let utcDayStart = utc.startOfDay(for: Date()).formatted(date: .omitted, time: .shortened)
-        var codexScope = "Codex tokens are OpenAI account totals by UTC day, which starts at \(utcDayStart) local time."
-            + " Dollars price each day with that UTC day's local model mix from ~/.codex."
+        var codexScope = "Codex tokens are each OpenAI account's totals by UTC day, which starts at \(utcDayStart) local time."
+            + " Dollars price each account's day with that UTC day's local model mix from its Codex folder."
         let cost = codexCost(in: period.interval())
         if cost.unmatchedTokens > 0, cost.usd != nil {
             codexScope += " \(compactTokens(cost.unmatchedTokens)) tokens fall on days without local model records"
@@ -505,9 +534,9 @@ final class TokenBarStore: ObservableObject {
         }
         let scope: String
         switch provider {
-        case .claude: scope = "Activity source: ~/.claude/projects."
+        case .claude: scope = "Activity source: projects in every Claude folder."
         case .codex: scope = codexScope
-        case .overview: scope = "Claude activity source: ~/.claude/projects. " + codexScope
+        case .overview: scope = "Claude activity source: projects in every Claude folder. " + codexScope
         }
         guard provider != .claude else {
             return "Estimated API-equivalent cost of text-model usage. " + scope
@@ -830,6 +859,7 @@ final class TokenBarStore: ObservableObject {
                 if accountID != previous.accountID {
                     account.quota = .empty
                     account.invalidatedReset = nil
+                    account.tokenActivity = nil
                 }
                 account.accountID = accountID
             }
@@ -843,6 +873,16 @@ final class TokenBarStore: ObservableObject {
                 account.quota = reading
             case let .failure(error):
                 recordFailure(error, in: &account.quota, at: date)
+            }
+            switch fetched.activity {
+            case let .success(activity):
+                account.tokenActivity = TokenActivity(
+                    lifetimeTokens: activity.lifetimeTokens, daily: recentBuckets(activity.daily), utcDays: true
+                )
+                estimateFailures["\(account.name) usage"] = nil
+            case let .failure(error):
+                let message = error.localizedDescription
+                estimateFailures["\(account.name) usage"] = message == account.quota.error ? nil : message
             }
         case let .failure(error):
             recordFailure(error, in: &account.quota, at: date)
@@ -1070,7 +1110,8 @@ final class TokenBarStore: ObservableObject {
             var seen: Set<String> = [primary]
             return sources.filter { $0.provider == provider && seen.insert($0.directory).inserted }.map(\.url)
         }
-        claudeProfiles = ClaudeAccountProfile.discover(in: directories(for: .claude), primaryID: claudeID)
+        claudeDirectories = directories(for: .claude)
+        claudeProfiles = ClaudeAccountProfile.discover(in: claudeDirectories, primaryID: claudeID)
         let previousClaude = snapshot.additionalClaudeAccounts ?? []
         let claudeAccounts = claudeProfiles.map { profile in
             ClaudeAccountSnapshot(
@@ -1092,7 +1133,9 @@ final class TokenBarStore: ObservableObject {
                 accountID: cached?.accountID,
                 quota: cached?.quota ?? .empty,
                 weeklyValue: cached?.weeklyValue,
-                invalidatedReset: cached?.invalidatedReset
+                invalidatedReset: cached?.invalidatedReset,
+                tokenActivity: cached?.tokenActivity,
+                costLedger: cached?.costLedger
             )
         }
         next.additionalCodexAccounts = codexAccounts.isEmpty ? nil : codexAccounts
@@ -1213,9 +1256,7 @@ private func fetchCodexAccounts(
 ) async -> [(String, Result<CodexFetchResult, Error>)] {
     await fetchAccountProfiles(profiles) { profile in
         (profile.id, await capture {
-            try await CodexAppServerClient().fetch(
-                codexHome: profile.configDirectory, includeActivity: false, readings: readings
-            )
+            try await CodexAppServerClient().fetch(codexHome: profile.configDirectory, readings: readings)
         })
     }
 }

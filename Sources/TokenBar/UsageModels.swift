@@ -143,6 +143,8 @@ struct CodexAccountSnapshot: Codable, Hashable, Identifiable {
     var quota: ProviderSnapshot
     var weeklyValue: WeeklyValueEstimate? = nil
     var invalidatedReset: Date? = nil
+    var tokenActivity: TokenActivity? = nil
+    var costLedger: CostLedger? = nil
 }
 
 struct DailyUsageBucket: Codable, Hashable, Identifiable {

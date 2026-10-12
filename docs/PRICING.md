@@ -53,8 +53,8 @@ All period cost = Claude period cost + Codex period cost
 ```
 
 Claude token totals and price mix come from the same local records.
-Codex token totals come from the account's daily buckets, which cover every device and report UTC days.
-Each bucket belongs to the local day that contains its midpoint, and is priced with the same UTC day's mix from Codex records on this Mac.
+Codex token totals sum each signed-in account's daily buckets, which cover every device and report UTC days.
+Each bucket belongs to the local day that contains its midpoint, and is priced with the same UTC day's mix from that account's Codex folder.
 Days without a usable local mix use the period's average rate, and the app hides dollars when no day has one.
 
 ## Weekly capacity

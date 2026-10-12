@@ -10,7 +10,7 @@ struct CodexWindowSampler {
     init(defaults: UserDefaults = .standard, codexHome: URL? = nil) {
         self.defaults = defaults
         self.codexHome = codexHome ?? AccountSource.primaryDirectory(for: .codex)
-        ledgerKey = codexHome.map { StorageKeys.profileWindowLedger(StorageKeys.codexWindowLedger, directory: $0.path) }
+        ledgerKey = codexHome.map { StorageKeys.profileLedger(StorageKeys.codexWindowLedger, directory: $0.path) }
             ?? StorageKeys.codexWindowLedger
     }
 

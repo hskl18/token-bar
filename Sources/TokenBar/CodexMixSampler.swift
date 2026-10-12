@@ -3,6 +3,14 @@ import Foundation
 struct CodexMixSampler {
     private let readChunkBytes = 1024 * 1024
     private let parser = CodexTranscriptParser()
+    private let codexHome: URL
+    private let ledgerKey: String
+
+    init(codexHome: URL? = nil) {
+        self.codexHome = codexHome ?? AccountSource.primaryDirectory(for: .codex)
+        ledgerKey = codexHome.map { StorageKeys.profileLedger(StorageKeys.codexUsageLedger, directory: $0.path) }
+            ?? StorageKeys.codexUsageLedger
+    }
 
     func update() async -> CodexUsageLedger {
         let scan = Task.detached(priority: .utility) { updateSynchronously() }
@@ -94,9 +102,8 @@ struct CodexMixSampler {
     }
 
     private func sessionFiles(since cutoff: Date) -> [TranscriptFile] {
-        let home = AccountSource.primaryDirectory(for: .codex)
-        return TranscriptFile.list(in: ["sessions", "archived_sessions"].map {
-            home.appendingPathComponent($0)
+        TranscriptFile.list(in: ["sessions", "archived_sessions"].map {
+            codexHome.appendingPathComponent($0)
         }, since: cutoff)
     }
 
@@ -169,10 +176,10 @@ struct CodexMixSampler {
     }
 
     private func loadLedger() -> CodexUsageLedger {
-        TranscriptCache.load(CodexUsageLedger.self, key: StorageKeys.codexUsageLedger) ?? .empty
+        TranscriptCache.load(CodexUsageLedger.self, key: ledgerKey) ?? .empty
     }
 
     private func save(_ ledger: CodexUsageLedger) {
-        TranscriptCache.save(ledger, key: StorageKeys.codexUsageLedger)
+        TranscriptCache.save(ledger, key: ledgerKey)
     }
 }

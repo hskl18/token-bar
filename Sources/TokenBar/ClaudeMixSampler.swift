@@ -2,6 +2,7 @@ import Foundation
 
 struct ClaudeMixSampler {
     private let readChunkBytes = 1024 * 1024
+    var configDirectories = [AccountSource.primaryDirectory(for: .claude)]
 
     func update() async -> ClaudeUsageLedger {
         let scan = Task.detached(priority: .utility) { updateSynchronously() }
@@ -86,8 +87,7 @@ struct ClaudeMixSampler {
     }
 
     private func sessionFiles() -> [(URL, UInt64)] {
-        let root = AccountSource.primaryDirectory(for: .claude).appendingPathComponent("projects")
-        return TranscriptFile.list(in: [root]).map { ($0.url, $0.size) }
+        TranscriptFile.list(in: configDirectories.map { $0.appendingPathComponent("projects") }).map { ($0.url, $0.size) }
     }
 
     private func parseLines(
