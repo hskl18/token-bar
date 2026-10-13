@@ -36,7 +36,7 @@ Extra accounts come from `~/.claude-*` and `~/.codex-*` folders that contain a k
 Discovery lists only the home folder's top level; it does not search deeper or read unrelated files.
 Each Codex account runs its own app-server child with `CODEX_HOME` set, inherited credential variables removed, and analytics disabled.
 Folders the server reports as the same login share one quota request and appear once, preferring a fresh reading.
-Extra accounts add quota rows and a weekly estimate from their own local sessions; activity cards stay on the primary accounts.
+Extra accounts add quota rows, a weekly estimate from their own local sessions, and their usage to the activity cards.
 
 The presentation layer derives one of four states from displayable provider data: none, Claude-only, Codex-only, or both.
 Only the dual-provider state renders All, and each state has its own compact panel height.
@@ -64,8 +64,9 @@ The parser keeps per-message token maxima so later streamed snapshots add only t
 
 `CodexTranscriptParser` owns Codex schema interpretation, token delta normalization, model context, stable identity, and fork/subagent copied-history suppression.
 `CodexWindowSampler` uses it for the current official weekly interval.
-`CodexMixSampler` uses it for the available calendar year, and adds threads whose rollout files are gone from the thread table.
+`CodexMixSampler` uses it for the available calendar year.
 Both Codex samplers scan `sessions` and `archived_sessions`, and pricing keys record each request's speed tier and long-context use.
+`CodexThreadTable` adds threads whose rollout files are gone to both samplers' results, less the cumulative total each session's last scan read.
 
 Sharing the parser keeps local schema interpretation consistent.
 Account and local sources can still differ in scope and timing; see [pricing limits](PRICING.md#limits).

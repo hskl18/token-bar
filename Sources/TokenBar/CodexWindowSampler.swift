@@ -6,14 +6,17 @@ struct CodexWindowSampler {
     private let parser = CodexTranscriptParser()
     private let codexHome: URL
     private let ledgerKey: String
+    private let mixSampler: CodexMixSampler
 
     init(defaults: UserDefaults = .standard, codexHome: URL? = nil) {
         self.defaults = defaults
         self.codexHome = codexHome ?? AccountSource.primaryDirectory(for: .codex)
+        mixSampler = CodexMixSampler(codexHome: codexHome)
         ledgerKey = codexHome.map { StorageKeys.profileLedger(StorageKeys.codexWindowLedger, directory: $0.path) }
             ?? StorageKeys.codexWindowLedger
     }
 
+    /// The result also counts threads whose rollout files are gone; the saved ledger keeps only rollout records.
     func update(windowStartedAt: Date, resetsAt: Date) async throws -> CodexWindowLedger {
         let scan = Task.detached(priority: .utility) {
             try updateSynchronously(windowStartedAt: windowStartedAt, resetsAt: resetsAt)
@@ -97,12 +100,21 @@ struct CodexWindowSampler {
         }
 
         ledger.cursors = ledger.cursors.filter { activePaths.contains($0.key) }
-        ledger.isComplete = true
-        if ledgerKey == StorageKeys.codexWindowLedger, ledger.parseErrors == 0, ledger.observedTokens > 0 {
-            saveLastKnownMix(ledger.mixLedger)
+        for cursor in ledger.cursors.values {
+            guard let total = cursor.previousTotal?.total else { continue }
+            ledger.rolloutTotals[cursor.logicalSessionKey] = total
         }
+        ledger.isComplete = true
         save(ledger)
-        return ledger
+        var result = ledger
+        CodexThreadTable.addLostThreads(
+            in: codexHome, since: windowStartedAt, seen: ledger.rolloutTotals, to: &result.byDayAndModel,
+            fallback: mixSampler.savedMixLedger
+        )
+        if ledgerKey == StorageKeys.codexWindowLedger, result.parseErrors == 0, result.observedTokens > 0 {
+            saveLastKnownMix(result.mixLedger)
+        }
+        return result
     }
 
     func lastKnownMixLedger() -> MixLedger? {

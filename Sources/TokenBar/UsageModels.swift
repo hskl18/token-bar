@@ -569,6 +569,8 @@ struct CodexWindowLedger: Codable, Hashable {
     var messageHashes: Set<UInt64>
     var parseErrors: Int
     var isComplete: Bool
+    // Each session's latest cumulative total, so a deleted file adds only usage after the last scan.
+    var rolloutTotals: [String: Int64]
 
     static func empty(windowStartedAt: Date, resetsAt: Date, observedAt: Date) -> Self {
         Self(
@@ -579,7 +581,8 @@ struct CodexWindowLedger: Codable, Hashable {
             byDayAndModel: [:],
             messageHashes: [],
             parseErrors: 0,
-            isComplete: false
+            isComplete: false,
+            rolloutTotals: [:]
         )
     }
 
@@ -607,20 +610,25 @@ struct ClaudeUsageLedger: Codable, Hashable {
     static let empty = ClaudeUsageLedger(cursors: [:], byDayAndModel: [:], messageUsage: [:])
 }
 
+struct RolloutTotal: Codable, Hashable {
+    var day: String
+    var tokens: Int64
+}
+
 struct CodexUsageLedger: Codable, Hashable {
     var cursors: [String: CodexWindowCursor]
     var byDayAndModel: [String: [String: TokenBreakdown]]
     var messageHashesByDay: [String: Set<UInt64>]
     var parseErrors: Int
-    // Rollouts read by any scan, by UTC day, so a file deleted later is not counted again from the thread table.
-    var scannedRollouts: [String: String]
+    // Each session's latest cumulative total and the UTC day it was read, so a deleted file adds only later usage.
+    var rolloutTotals: [String: RolloutTotal]
 
     static let empty = CodexUsageLedger(
         cursors: [:],
         byDayAndModel: [:],
         messageHashesByDay: [:],
         parseErrors: 0,
-        scannedRollouts: [:]
+        rolloutTotals: [:]
     )
 
     var mixLedger: MixLedger {

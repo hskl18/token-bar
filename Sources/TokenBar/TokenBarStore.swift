@@ -232,10 +232,11 @@ final class TokenBarStore: ObservableObject {
                 else { continue }
                 applyCodexAccountResult(result, at: index, date: attemptedAt)
                 guard let account = snapshot.additionalCodexAccounts?[index] else { continue }
-                let weeklyValue = sameReset(weeklyWindow(in: account.quota)?.resetsAt, account.invalidatedReset)
-                    ? nil : await profileWeeklyValue(.codex, quota: account.quota, directory: profile.configDirectory)
+                // The calendar scan runs first because the window scan borrows its token categories.
                 let usage = await CodexMixSampler(codexHome: profile.configDirectory).update()
                 let costLedger = await PriceCatalog().costLedger(for: usage.mixLedger)
+                let weeklyValue = sameReset(weeklyWindow(in: account.quota)?.resetsAt, account.invalidatedReset)
+                    ? nil : await profileWeeklyValue(.codex, quota: account.quota, directory: profile.configDirectory)
                 guard !Task.isCancelled, refreshGeneration == generation else { return }
                 if let currentIndex = snapshot.additionalCodexAccounts?.firstIndex(where: { $0.id == id }) {
                     snapshot.additionalCodexAccounts?[currentIndex].weeklyValue = weeklyValue
@@ -321,11 +322,14 @@ final class TokenBarStore: ObservableObject {
                 if !claudeCostLedger.byDay.isEmpty {
                     snapshot.claudeCostLedger = claudeCostLedger
                 }
-                updateClaudeWeeklyValue(
-                    result: claudeWindowResult,
-                    ledger: claudeWindowLedger,
-                    costMix: claudeWindowMix
-                )
+                // A refresh for extra accounts alone must not clear the primary's estimate status.
+                if scanClaude {
+                    updateClaudeWeeklyValue(
+                        result: claudeWindowResult,
+                        ledger: claudeWindowLedger,
+                        costMix: claudeWindowMix
+                    )
+                }
             }
             if let officialCodexActivity {
                 snapshot.tokenActivity = officialCodexActivity
@@ -415,19 +419,36 @@ final class TokenBarStore: ObservableObject {
             }
     }
 
-    // A period's dollars need every account priced, so one unpriced account hides the total.
+    // An account with no local mix in the period, such as one used only elsewhere, takes the others' rate;
+    // an account whose mix lacks prices hides the total.
     private func codexCost(in interval: DateInterval) -> (usd: Double?, unmatchedTokens: Int64) {
-        codexUsage.reduce((usd: 0, unmatchedTokens: 0)) { total, usage in
+        var usd = 0.0
+        var pricedTokens: Int64 = 0
+        var unmixedTokens: Int64 = 0
+        var unmatched: Int64 = 0
+        for usage in codexUsage {
             let cost = codexCost(of: usage.activity, ledger: usage.ledger, in: interval)
-            return (total.usd.flatMap { sum in cost.usd.map { sum + $0 } }, total.unmatchedTokens + cost.unmatchedTokens)
+            let tokens = usage.activity.tokens(in: interval)
+            unmatched += cost.unmatchedTokens
+            if let accountUSD = cost.usd {
+                usd += accountUSD
+                pricedTokens += tokens
+            } else if !cost.hasMix {
+                unmixedTokens += tokens
+            } else {
+                return (nil, unmatched)
+            }
         }
+        guard unmixedTokens > 0 else { return (usd, unmatched) }
+        guard pricedTokens > 0 else { return (nil, unmatched) }
+        return (usd + Double(unmixedTokens) * usd / Double(pricedTokens), unmatched)
     }
 
     // The account reports no models, so each UTC day uses that day's local mix and days without one
     // use the period's average rate; unknown models still need 99.9% coverage across the period.
     private func codexCost(
         of activity: TokenActivity, ledger: CostLedger?, in interval: DateInterval
-    ) -> (usd: Double?, unmatchedTokens: Int64) {
+    ) -> (usd: Double?, unmatchedTokens: Int64, hasMix: Bool) {
         let buckets = activity.buckets(in: interval)
         var usd = 0.0
         var priced: Int64 = 0
@@ -440,10 +461,10 @@ final class TokenBarStore: ObservableObject {
                 unmatched += bucket.tokens
             }
         }
-        guard priced + unmatched > 0 else { return (0, 0) }
+        guard priced + unmatched > 0 else { return (0, 0, true) }
         let mixes = buckets.compactMap { ledger?.byDay[$0.startDate] }
-        guard priced > 0, CostMix.merged(mixes).hasPricedCoverage else { return (nil, unmatched) }
-        return (usd + Double(unmatched) * usd / Double(priced), unmatched)
+        guard priced > 0, CostMix.merged(mixes).hasPricedCoverage else { return (nil, unmatched, !mixes.isEmpty) }
+        return (usd + Double(unmatched) * usd / Double(priced), unmatched, true)
     }
 
     func weeklyValues(for provider: ProviderScope) -> [WeeklyValueEstimate] {
@@ -1139,6 +1160,9 @@ final class TokenBarStore: ObservableObject {
             )
         }
         next.additionalCodexAccounts = codexAccounts.isEmpty ? nil : codexAccounts
+        // Usage warnings are keyed by account name, so drop those of folders that are gone or renamed.
+        let usageWarnings = Set(codexAccounts.map { "\($0.name) usage" })
+        estimateFailures = estimateFailures.filter { !$0.key.hasSuffix(" usage") || usageWarnings.contains($0.key) }
         profileSyncAt = date
         guard next.claudeAccountID != snapshot.claudeAccountID
                 || next.additionalClaudeAccounts != snapshot.additionalClaudeAccounts
