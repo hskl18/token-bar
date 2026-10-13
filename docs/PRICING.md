@@ -55,6 +55,7 @@ All period cost = Claude period cost + Codex period cost
 Claude token totals and price mix come from the same local records.
 Codex token totals sum each signed-in account's daily buckets, which cover every device and report UTC days.
 Each bucket belongs to the local day that contains its midpoint, and is priced with the same UTC day's mix from that account's Codex folder.
+A thread whose rollout file is gone joins that mix from the folder's `state_5.sqlite` thread table, with its model's local token categories.
 Days without a usable local mix use the period's average rate, and the app hides dollars when no day has one.
 
 ## Weekly capacity
@@ -131,6 +132,7 @@ All remains unavailable until both providers have usable capacity evidence.
 - Speed and long-context adjustments require recorded request metadata and a published rate.
 - Account counters, local records and quota percentages may differ in scope and update timing; the near-start baseline can omit initial usage.
 - Applying a local price mix to account totals assumes representative models and token categories, with matching calendar dates.
+- A lost thread counts on its last update's UTC day, and a model with no local records leaves its lost threads out of the mix.
 - Completed local scans include Codex archives but not other hosts, so they do not establish whole-account coverage.
 - A falling projection alone does not prove a quota reduction or poor image value.
 - Claude cleanup can remove old local sessions.

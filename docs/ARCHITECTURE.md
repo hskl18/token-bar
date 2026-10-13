@@ -64,7 +64,7 @@ The parser keeps per-message token maxima so later streamed snapshots add only t
 
 `CodexTranscriptParser` owns Codex schema interpretation, token delta normalization, model context, stable identity, and fork/subagent copied-history suppression.
 `CodexWindowSampler` uses it for the current official weekly interval.
-`CodexMixSampler` uses it for the available calendar year.
+`CodexMixSampler` uses it for the available calendar year, and adds threads whose rollout files are gone from the thread table.
 Both Codex samplers scan `sessions` and `archived_sessions`, and pricing keys record each request's speed tier and long-context use.
 
 Sharing the parser keeps local schema interpretation consistent.

@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 
 struct CodexMixSampler {
     private let readChunkBytes = 1024 * 1024
@@ -12,6 +13,7 @@ struct CodexMixSampler {
             ?? StorageKeys.codexUsageLedger
     }
 
+    /// The result also counts threads whose rollout files are gone; the saved ledger keeps only rollout records.
     func update() async -> CodexUsageLedger {
         let scan = Task.detached(priority: .utility) { updateSynchronously() }
         return await withTaskCancellationHandler(operation: { await scan.value }, onCancel: { scan.cancel() })
@@ -97,8 +99,65 @@ struct CodexMixSampler {
         ledger.cursors = ledger.cursors.filter { activePaths.contains($0.key) }
         ledger.byDayAndModel = ledger.byDayAndModel.filter { $0.key >= cutoffDay }
         ledger.messageHashesByDay = ledger.messageHashesByDay.filter { $0.key >= cutoffDay }
+        let today = TokenActivity.utcDayFormatter.string(from: Date())
+        var scanned = ledger.scannedRollouts.filter { $0.value >= cutoffDay }
+        for path in activePaths { scanned[path] = today }
+        ledger.scannedRollouts = scanned
         if ledger != original { save(ledger) }
-        return ledger
+        return supplemented(ledger, since: cutoff, cutoffDay: cutoffDay)
+    }
+
+    // Each lost thread's total takes the token categories of the same model's local records.
+    private func supplemented(_ ledger: CodexUsageLedger, since cutoff: Date, cutoffDay: String) -> CodexUsageLedger {
+        let missing = missingThreadTokens(since: cutoff, scanned: ledger.scannedRollouts)
+        guard !missing.isEmpty else { return ledger }
+        let keysByModel = Dictionary(grouping: ledger.mixLedger.byModel) { UsagePriceKey.model($0.key) }
+        var result = ledger
+        for (day, models) in missing where day >= cutoffDay {
+            for (model, tokens) in models {
+                // A model without local records has no categories to price, so its threads stay out.
+                guard let keys = keysByModel[model] else { continue }
+                let localTokens = keys.reduce(0) { $0 + $1.value.total }
+                guard localTokens > 0 else { continue }
+                for (key, breakdown) in keys {
+                    result.byDayAndModel[day, default: [:]][key, default: TokenBreakdown()]
+                        .add(breakdown.scaled(by: Double(tokens) / Double(localTokens)))
+                }
+            }
+        }
+        return result
+    }
+
+    /// Tokens of threads whose rollout file is gone, by UTC day and model, from Codex's thread table.
+    private func missingThreadTokens(since cutoff: Date, scanned: [String: String]) -> [String: [String: Int64]] {
+        let database = codexHome.appendingPathComponent("state_5.sqlite")
+        var connection: OpaquePointer?
+        defer { sqlite3_close(connection) }
+        guard AccountSource.isRegularFile(database),
+              sqlite3_open_v2(database.path, &connection, SQLITE_OPEN_READONLY, nil) == SQLITE_OK
+        else { return [:] }
+        sqlite3_busy_timeout(connection, 1000)
+        var statement: OpaquePointer?
+        defer { sqlite3_finalize(statement) }
+        let query = "SELECT rollout_path, model, tokens_used, updated_at FROM threads"
+            + " WHERE updated_at >= ? AND tokens_used > 0 AND model IS NOT NULL"
+        guard sqlite3_prepare_v2(connection, query, -1, &statement, nil) == SQLITE_OK else { return [:] }
+        sqlite3_bind_int64(statement, 1, Int64(cutoff.timeIntervalSince1970))
+        var tokens: [String: [String: Int64]] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let pathText = sqlite3_column_text(statement, 0),
+                  let modelText = sqlite3_column_text(statement, 1)
+            else { continue }
+            let path = String(cString: pathText)
+            guard scanned[path] == nil, !AccountSource.isExcluded(URL(fileURLWithPath: path)),
+                  !FileManager.default.fileExists(atPath: path)
+            else { continue }
+            // shortcut: a thread's whole total lands on its last update's UTC day; split by turn if long threads lose files.
+            let updatedAt = Date(timeIntervalSince1970: TimeInterval(sqlite3_column_int64(statement, 3)))
+            let day = TokenActivity.utcDayFormatter.string(from: updatedAt)
+            tokens[day, default: [:]][String(cString: modelText), default: 0] += sqlite3_column_int64(statement, 2)
+        }
+        return tokens
     }
 
     private func sessionFiles(since cutoff: Date) -> [TranscriptFile] {

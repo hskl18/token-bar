@@ -221,6 +221,19 @@ struct TokenBreakdown: Codable, Hashable {
 
     var total: Int64 { input + cacheCreationInput + cachedInput + output + reasoning }
 
+    func scaled(by factor: Double) -> TokenBreakdown {
+        func scale(_ value: Int64) -> Int64 { Int64((Double(value) * factor).rounded()) }
+        return TokenBreakdown(
+            input: scale(input),
+            cacheCreationInput: scale(cacheCreationInput),
+            cacheCreationInput5m: cacheCreationInput5m.map(scale),
+            cacheCreationInput1h: cacheCreationInput1h.map(scale),
+            cachedInput: scale(cachedInput),
+            output: scale(output),
+            reasoning: scale(reasoning)
+        )
+    }
+
     mutating func add(_ other: TokenBreakdown) {
         input += other.input
         cacheCreationInput += other.cacheCreationInput
@@ -599,12 +612,15 @@ struct CodexUsageLedger: Codable, Hashable {
     var byDayAndModel: [String: [String: TokenBreakdown]]
     var messageHashesByDay: [String: Set<UInt64>]
     var parseErrors: Int
+    // Rollouts read by any scan, by UTC day, so a file deleted later is not counted again from the thread table.
+    var scannedRollouts: [String: String]
 
     static let empty = CodexUsageLedger(
         cursors: [:],
         byDayAndModel: [:],
         messageHashesByDay: [:],
-        parseErrors: 0
+        parseErrors: 0,
+        scannedRollouts: [:]
     )
 
     var mixLedger: MixLedger {
