@@ -408,13 +408,12 @@ final class TokenBarStore: ObservableObject {
         return codexCost(in: interval).usd.map { $0 + imageCost }
     }
 
-    // Each Codex login once: the primary account, then extra accounts with a different account ID.
+    // Each Codex login once, picked like the quota rows so a fresh duplicate replaces a stale primary.
     private var codexUsage: [(activity: TokenActivity, ledger: CostLedger?)] {
-        var seen = Set([snapshot.codexAccountID].compactMap { $0 })
-        return [(snapshot.tokenActivity, snapshot.codexCostLedger)]
-            + (snapshot.additionalCodexAccounts ?? []).compactMap { account in
-                guard let activity = account.tokenActivity, let id = account.accountID,
-                      seen.insert(id).inserted else { return nil }
+        (snapshot.primaryCodexYields ? [] : [(snapshot.tokenActivity, snapshot.codexCostLedger)])
+            + snapshot.visibleCodexAccounts.compactMap { account in
+                // Without an account ID, a folder could repeat the primary login.
+                guard account.accountID != nil, let activity = account.tokenActivity else { return nil }
                 return (activity, account.costLedger)
             }
     }
