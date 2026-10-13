@@ -3,7 +3,16 @@ import Foundation
 struct CodexMixSampler {
     private let readChunkBytes = 1024 * 1024
     private let parser = CodexTranscriptParser()
+    private let codexHome: URL
+    private let ledgerKey: String
 
+    init(codexHome: URL? = nil) {
+        self.codexHome = codexHome ?? AccountSource.primaryDirectory(for: .codex)
+        ledgerKey = codexHome.map { StorageKeys.profileLedger(StorageKeys.codexUsageLedger, directory: $0.path) }
+            ?? StorageKeys.codexUsageLedger
+    }
+
+    /// The result also counts threads whose rollout files are gone; the saved ledger keeps only rollout records.
     func update() async -> CodexUsageLedger {
         let scan = Task.detached(priority: .utility) { updateSynchronously() }
         return await withTaskCancellationHandler(operation: { await scan.value }, onCancel: { scan.cancel() })
@@ -87,16 +96,30 @@ struct CodexMixSampler {
         }
 
         ledger.cursors = ledger.cursors.filter { activePaths.contains($0.key) }
+        let today = TokenActivity.utcDayFormatter.string(from: Date())
+        for cursor in ledger.cursors.values {
+            guard let total = cursor.previousTotal?.total else { continue }
+            ledger.rolloutTotals[cursor.logicalSessionKey] = RolloutTotal(day: today, tokens: total)
+        }
         ledger.byDayAndModel = ledger.byDayAndModel.filter { $0.key >= cutoffDay }
         ledger.messageHashesByDay = ledger.messageHashesByDay.filter { $0.key >= cutoffDay }
+        ledger.rolloutTotals = ledger.rolloutTotals.filter { $0.value.day >= cutoffDay }
         if ledger != original { save(ledger) }
-        return ledger
+        var result = ledger
+        CodexThreadTable.addLostThreads(
+            in: codexHome, since: cutoff, seen: ledger.rolloutTotals.mapValues(\.tokens), to: &result.byDayAndModel
+        )
+        return result
+    }
+
+    /// The saved calendar mix, without lost threads.
+    func savedMixLedger() -> MixLedger {
+        loadLedger().mixLedger
     }
 
     private func sessionFiles(since cutoff: Date) -> [TranscriptFile] {
-        let home = AccountSource.primaryDirectory(for: .codex)
-        return TranscriptFile.list(in: ["sessions", "archived_sessions"].map {
-            home.appendingPathComponent($0)
+        TranscriptFile.list(in: ["sessions", "archived_sessions"].map {
+            codexHome.appendingPathComponent($0)
         }, since: cutoff)
     }
 
@@ -169,10 +192,10 @@ struct CodexMixSampler {
     }
 
     private func loadLedger() -> CodexUsageLedger {
-        TranscriptCache.load(CodexUsageLedger.self, key: StorageKeys.codexUsageLedger) ?? .empty
+        TranscriptCache.load(CodexUsageLedger.self, key: ledgerKey) ?? .empty
     }
 
     private func save(_ ledger: CodexUsageLedger) {
-        TranscriptCache.save(ledger, key: StorageKeys.codexUsageLedger)
+        TranscriptCache.save(ledger, key: ledgerKey)
     }
 }

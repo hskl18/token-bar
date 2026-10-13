@@ -45,10 +45,11 @@ Claude Code writes assistant usage records under:
 
 ```text
 ~/.claude/projects/**/*.jsonl
+~/.claude-*/projects/**/*.jsonl
 ```
 
 Token Bar reads those files in 1 MB chunks on utility tasks.
-Activity cards use only this primary history; an extra account's own `projects` folder supplies just its weekly estimate.
+Activity cards sum every Claude folder's history, and each extra account's own `projects` folder also supplies its weekly estimate.
 The first scan backfills the available calendar year.
 Later scans read bytes appended after each saved cursor.
 

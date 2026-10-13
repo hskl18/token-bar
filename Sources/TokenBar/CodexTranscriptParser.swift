@@ -35,7 +35,7 @@ struct CodexTranscriptParser {
             if cursor.sawSessionMeta != true {
                 cursor.sawSessionMeta = true
                 if let id = nonEmpty(payload?["id"] as? String) {
-                    cursor.logicalSessionKey = "codex-session:\(id)"
+                    cursor.logicalSessionKey = Self.sessionKey(id)
                 }
                 if isFork(payload: payload) {
                     cursor.suppressingForkCopies = true
@@ -115,6 +115,9 @@ struct CodexTranscriptParser {
             malformed: false
         )
     }
+
+    /// The cursor key of a rollout with this session ID, which is also its Codex thread ID.
+    static func sessionKey(_ id: String) -> String { "codex-session:\(id)" }
 
     func isRelevantPrefix(_ prefix: Data.SubSequence) -> Bool {
         prefix.range(of: Self.sessionMetaMarker) != nil

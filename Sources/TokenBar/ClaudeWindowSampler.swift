@@ -9,7 +9,7 @@ struct ClaudeWindowSampler {
     init(configDirectory: URL? = nil) {
         self.configDirectory = configDirectory ?? AccountSource.primaryDirectory(for: .claude)
         ledgerKey = configDirectory.map {
-            StorageKeys.profileWindowLedger(StorageKeys.claudeWindowLedger, directory: $0.path)
+            StorageKeys.profileLedger(StorageKeys.claudeWindowLedger, directory: $0.path)
         } ?? StorageKeys.claudeWindowLedger
     }
 

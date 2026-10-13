@@ -53,9 +53,13 @@ All period cost = Claude period cost + Codex period cost
 ```
 
 Claude token totals and price mix come from the same local records.
-Codex token totals come from the account's daily buckets, which cover every device and report UTC days.
-Each bucket belongs to the local day that contains its midpoint, and is priced with the same UTC day's mix from Codex records on this Mac.
-Days without a usable local mix use the period's average rate, and the app hides dollars when no day has one.
+Codex token totals sum each signed-in account's daily buckets, which cover every device and report UTC days.
+Each bucket belongs to the local day that contains its midpoint, and is priced with the same UTC day's mix from that account's Codex folder.
+A thread whose rollout file is gone joins Codex mixes and current-window samples from the folder's `state_5.sqlite` thread table.
+Its `tokens_used`, less the cumulative total the last scan of that session read, is split like the same model's local token categories.
+A spawned subagent thread lost before any scan is skipped, because its total starts with its parent's.
+Days without a usable local mix use the period's average rate.
+An account with no local mix in the period uses the other accounts' combined rate, and the app hides dollars when no account has one.
 
 ## Weekly capacity
 
@@ -131,6 +135,8 @@ All remains unavailable until both providers have usable capacity evidence.
 - Speed and long-context adjustments require recorded request metadata and a published rate.
 - Account counters, local records and quota percentages may differ in scope and update timing; the near-start baseline can omit initial usage.
 - Applying a local price mix to account totals assumes representative models and token categories, with matching calendar dates.
+- A lost thread counts on its last update's UTC day as its last model, and one begun before a window counts its run-time share inside it.
+- A model with no local records leaves its lost threads out, and a user thread that copies another thread's history counts that history if it is lost before any scan.
 - Completed local scans include Codex archives but not other hosts, so they do not establish whole-account coverage.
 - A falling projection alone does not prove a quota reduction or poor image value.
 - Claude cleanup can remove old local sessions.

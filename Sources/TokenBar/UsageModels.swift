@@ -143,6 +143,8 @@ struct CodexAccountSnapshot: Codable, Hashable, Identifiable {
     var quota: ProviderSnapshot
     var weeklyValue: WeeklyValueEstimate? = nil
     var invalidatedReset: Date? = nil
+    var tokenActivity: TokenActivity? = nil
+    var costLedger: CostLedger? = nil
 }
 
 struct DailyUsageBucket: Codable, Hashable, Identifiable {
@@ -218,6 +220,19 @@ struct TokenBreakdown: Codable, Hashable {
     var reasoning: Int64 = 0
 
     var total: Int64 { input + cacheCreationInput + cachedInput + output + reasoning }
+
+    func scaled(by factor: Double) -> TokenBreakdown {
+        func scale(_ value: Int64) -> Int64 { Int64((Double(value) * factor).rounded()) }
+        return TokenBreakdown(
+            input: scale(input),
+            cacheCreationInput: scale(cacheCreationInput),
+            cacheCreationInput5m: cacheCreationInput5m.map(scale),
+            cacheCreationInput1h: cacheCreationInput1h.map(scale),
+            cachedInput: scale(cachedInput),
+            output: scale(output),
+            reasoning: scale(reasoning)
+        )
+    }
 
     mutating func add(_ other: TokenBreakdown) {
         input += other.input
@@ -554,6 +569,8 @@ struct CodexWindowLedger: Codable, Hashable {
     var messageHashes: Set<UInt64>
     var parseErrors: Int
     var isComplete: Bool
+    // Each session's latest cumulative total, so a deleted file adds only usage after the last scan.
+    var rolloutTotals: [String: Int64]
 
     static func empty(windowStartedAt: Date, resetsAt: Date, observedAt: Date) -> Self {
         Self(
@@ -564,7 +581,8 @@ struct CodexWindowLedger: Codable, Hashable {
             byDayAndModel: [:],
             messageHashes: [],
             parseErrors: 0,
-            isComplete: false
+            isComplete: false,
+            rolloutTotals: [:]
         )
     }
 
@@ -592,17 +610,25 @@ struct ClaudeUsageLedger: Codable, Hashable {
     static let empty = ClaudeUsageLedger(cursors: [:], byDayAndModel: [:], messageUsage: [:])
 }
 
+struct RolloutTotal: Codable, Hashable {
+    var day: String
+    var tokens: Int64
+}
+
 struct CodexUsageLedger: Codable, Hashable {
     var cursors: [String: CodexWindowCursor]
     var byDayAndModel: [String: [String: TokenBreakdown]]
     var messageHashesByDay: [String: Set<UInt64>]
     var parseErrors: Int
+    // Each session's latest cumulative total and the UTC day it was read, so a deleted file adds only later usage.
+    var rolloutTotals: [String: RolloutTotal]
 
     static let empty = CodexUsageLedger(
         cursors: [:],
         byDayAndModel: [:],
         messageHashesByDay: [:],
-        parseErrors: 0
+        parseErrors: 0,
+        rolloutTotals: [:]
     )
 
     var mixLedger: MixLedger {

@@ -2,8 +2,8 @@ enum StorageKeys {
     static let snapshot = "tokenbar.snapshot.v1"
     static let claudeLedger = "tokenbar.claude-ledger.v6"
     static let claudeWindowLedger = "tokenbar.claude-window-ledger.v6"
-    static let codexUsageLedger = "tokenbar.codex-usage-ledger.v6"
-    static let codexWindowLedger = "tokenbar.codex-window-ledger.v8"
+    static let codexUsageLedger = "tokenbar.codex-usage-ledger.v7"
+    static let codexWindowLedger = "tokenbar.codex-window-ledger.v9"
     static let codexLastKnownMix = "tokenbar.codex-last-known-mix.v4"
     static let codexRuntimeExecutable = "tokenbar.codex-runtime-executable.v1"
     static let priceCache = "tokenbar.price-cache.v7"
@@ -23,16 +23,16 @@ enum StorageKeys {
         imageGenerationUsage,
     ]
 
-    static let profileWindowLedgers = [claudeWindowLedger, codexWindowLedger]
+    static let profileLedgers = [claudeWindowLedger, codexWindowLedger, codexUsageLedger]
 
-    /// An extra account's current-window ledger: a profile ledger prefix plus its directory.
-    static func profileWindowLedger(_ base: String, directory: String) -> String {
+    /// An extra account's ledger: a profile ledger prefix plus its directory.
+    static func profileLedger(_ base: String, directory: String) -> String {
         base + "." + directory
     }
 
     static func isObsolete(_ key: String) -> Bool {
         (key.hasPrefix("tokenbar.") || key.hasPrefix("quotabar-lite."))
             && !active.contains(key)
-            && !profileWindowLedgers.contains { key.hasPrefix($0 + ".") }
+            && !profileLedgers.contains { key.hasPrefix($0 + ".") }
     }
 }
