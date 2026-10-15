@@ -170,7 +170,8 @@ struct ClaudeClient {
             }
         }
         let utilization = root["utilization"] as? [String: Any]
-        for row in (root["limits"] ?? utilization?["limits"]) as? [[String: Any]] ?? [] {
+        let limits = (root["limits"] ?? utilization?["limits"]) as? [[String: Any]] ?? []
+        for row in limits {
             guard let kind = row["kind"] as? String,
                   ["session", "weekly_all", "weekly_scoped"].contains(kind) else { continue }
             let scope = row["scope"] as? [String: Any]
@@ -191,9 +192,10 @@ struct ClaudeClient {
         if let extra = root["extra_usage"] as? [String: Any], extra["is_enabled"] as? Bool == true,
            let used = extra["used_credits"] as? Double,
            let limit = extra["monthly_limit"] as? Double, limit > 0 {
-            // claude.ai sends no reset for a monthly cap and shows the next UTC month; a spend row names its own.
-            let spendReset = ((root["limits"] ?? utilization?["limits"]) as? [[String: Any]])?
-                .first { $0["kind"] as? String == "spend" && $0["is_active"] as? Bool != false }?["resets_at"] as? String
+            // The usage API gives a monthly cap no reset unless a spend row names one; claude.ai shows the next UTC month.
+            let spendReset = limits.first {
+                $0["kind"] as? String == "spend" && $0["group"] as? String == "monthly" && $0["is_active"] as? Bool != false
+            }?["resets_at"] as? String
             var utc = Calendar(identifier: .gregorian)
             utc.timeZone = .gmt
             let monthReset = utc.dateInterval(of: .month, for: Date())?.end
