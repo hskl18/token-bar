@@ -40,7 +40,7 @@ Extra accounts add quota rows, a weekly estimate from their own local sessions, 
 
 The presentation layer derives one of four states from displayable provider data: none, Claude-only, Codex-only, or both.
 Only the dual-provider state renders All, and each state has its own compact panel height.
-Both providers show every returned quota window, and the panel grows for extra rows until it reaches the screen height, after which the quota area scrolls.
+Both providers show every returned quota window, and the panel grows for extra rows until it reaches 85% of the screen height, after which the quota area scrolls.
 The UI lists 5-hour rows, then Weekly rows, then any others, keeping account order and the main Codex bucket first.
 The parser retains the server's `limitName` for presentation.
 A missing 5-hour window is never inferred from the plan name; Plus, Pro, and future plans follow the account response.

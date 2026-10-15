@@ -16,8 +16,8 @@ enum TokenBarLayout {
     }
 
     static func panelSize(for snapshot: AppSnapshot) -> CGSize {
-        let screenHeight = NSScreen.main?.visibleFrame.height ?? 800
-        return CGSize(width: panelWidth, height: min(panelHeight(for: snapshot), max(250, screenHeight - 40)))
+        let screenHeight = NSScreen.main?.frame.height ?? 800
+        return CGSize(width: panelWidth, height: min(panelHeight(for: snapshot), max(250, screenHeight * 0.85)))
     }
 
     static func panelHeight(for presentation: ProviderPresentation) -> CGFloat {
