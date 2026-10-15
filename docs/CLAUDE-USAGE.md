@@ -7,6 +7,7 @@ Each source answers a different question.
 
 Anthropic's Claude Code OAuth usage endpoint provides the current 5-hour and 7-day percentages.
 It can also provide reset times, model-specific weekly windows, and an enabled usage-credit allowance.
+The allowance has no reset time, so Token Bar uses the start of the next UTC month, which claude.ai shows for a monthly spend limit, unless a `spend` limit row names one.
 
 Token Bar reads the existing Claude Code OAuth credential from macOS Keychain through `/usr/bin/security`.
 It does not ask the user to paste or store another token.

@@ -191,9 +191,16 @@ struct ClaudeClient {
         if let extra = root["extra_usage"] as? [String: Any], extra["is_enabled"] as? Bool == true,
            let used = extra["used_credits"] as? Double,
            let limit = extra["monthly_limit"] as? Double, limit > 0 {
+            // claude.ai sends no reset for a monthly cap and shows the next UTC month; a spend row names its own.
+            let spendReset = ((root["limits"] ?? utilization?["limits"]) as? [[String: Any]])?
+                .first { $0["kind"] as? String == "spend" && $0["is_active"] as? Bool != false }?["resets_at"] as? String
+            var utc = Calendar(identifier: .gregorian)
+            utc.timeZone = .gmt
+            let monthReset = utc.dateInterval(of: .month, for: Date())?.end
             windows.append(LimitWindow(
                 label: "Usage credits", usedPercent: min(100, max(0, used / limit * 100)),
-                windowMinutes: nil, resetsAt: nil, limitID: "claude:extra_usage", limitName: "Usage credits"
+                windowMinutes: nil, resetsAt: spendReset.flatMap(parseISO8601) ?? monthReset,
+                limitID: "claude:extra_usage", limitName: "Usage credits"
             ))
         }
 
