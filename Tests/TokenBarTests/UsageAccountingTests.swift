@@ -54,6 +54,26 @@ final class UsageAccountingTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(second.byDay["2026-10-02"]?.usdPerToken), 2e-6, accuracy: 1e-12)
     }
 
+    func testCodexSessionsCountOnlyForTheLoginThatCreatedThem() {
+        let tokens = #"{"timestamp":"2026-10-24T01:00:00Z","type":"event_msg","payload":{"type":"token_count","#
+            + #""info":{"total_token_usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}}"#
+        func events(creator: String?, folderLogin: String?) -> Int {
+            let meta = #"{"type":"session_meta","payload":{"id":"s1""#
+                + (creator.map { #","creator_account_id":"\#($0)""# } ?? "") + "}}"
+            var cursor = CodexWindowCursor(
+                offset: 0, model: nil, previousTotal: nil, logicalSessionKey: "rollout.jsonl",
+                sawSessionMeta: false, suppressingForkCopies: false, forkCopyAnchor: nil
+            )
+            let parser = CodexTranscriptParser(accountID: folderLogin)
+            return [meta, tokens].compactMap { parser.parse(Data($0.utf8), path: "rollout.jsonl", cursor: &cursor).event }.count
+        }
+
+        XCTAssertEqual(events(creator: "cli", folderLogin: "plus"), 0, "a session copied in from another login's folder")
+        XCTAssertEqual(events(creator: "cli", folderLogin: "cli"), 1)
+        XCTAssertEqual(events(creator: nil, folderLogin: "plus"), 1, "older sessions do not record a creator")
+        XCTAssertEqual(events(creator: "cli", folderLogin: nil), 1, "an unknown folder login keeps every session")
+    }
+
     func testClaudeLimitsRowsReplaceLegacyFieldsWithoutTouchingAllModels() throws {
         let reset = "2026-10-15T20:00:00Z"
         let body: [String: Any] = [

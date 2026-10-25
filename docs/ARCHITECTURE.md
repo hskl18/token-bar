@@ -19,6 +19,7 @@ Official prices + fallback ─ PriceCatalog ─ CostLedger ──┘
 Extra accounts carry their own `ProviderSnapshot`, keyed by Claude account and organization or by Codex configuration directory.
 `TokenActivity` contains Claude local-day totals and Codex account totals by UTC day; extra Codex accounts keep their own with their folder's `CostLedger`.
 `CostLedger` contains day-specific local model and token-category prices.
+For each Codex UTC day, observed tokens supply a local floor while the account bucket is absent or still smaller.
 Claude's `WeeklyCapacityHistory` contains a bounded set of derived 7-day capacity observations.
 `ImageGenerationUsage` contains saved-file-based estimates, separate from provider token activity.
 
@@ -36,6 +37,8 @@ Extra accounts come from `~/.claude-*` and `~/.codex-*` folders that contain a k
 Discovery lists only the home folder's top level; it does not search deeper or read unrelated files.
 Each Codex account runs its own app-server child with `CODEX_HOME` set, inherited credential variables removed, and analytics disabled.
 Folders the server reports as the same login share one quota request and appear once, preferring a fresh reading.
+Their local records share one incremental ledger, and each refresh scans that account's calendar and weekly window once.
+Activity selection uses its own successful-read timestamp rather than the freshness of the quota row.
 Extra accounts add quota rows, a weekly estimate from their own local sessions, and their usage to the activity cards.
 
 The presentation layer derives one of four states from displayable provider data: none, Claude-only, Codex-only, or both.
@@ -54,6 +57,8 @@ Relevant changes are coalesced for 20 seconds, and event-triggered refreshes run
 Only the changed account is refreshed; account requests retain the three-minute freshness limit and Claude rate-limit cooldown.
 A 30-minute background refresh covers quota resets, remote devices, and missed file events; the refresh button remains immediate.
 The root SwiftUI view leaves the outer background to the native menu to avoid stacked glass borders.
+The quota card stays outside the scroll view so scrolling moves the rows without moving its concentric background.
+The scroll viewport fills the card, with separate content and indicator margins and a rounded clip so indicators do not cover account values.
 
 ## Transcript parsing
 
@@ -95,6 +100,10 @@ The app reads JSONL files in 1 MiB chunks on utility tasks.
 Transcript ledgers are atomic JSON files under Application Support, written once per completed scan.
 Snapshots, prices, and bounded capacity samples stay in `UserDefaults`.
 It does not retain raw transcript text.
+Activity cards and their tooltips reuse one in-memory summary per provider and calendar period.
+Reconciled Codex account activity is also reused across periods until the snapshot changes.
+Snapshot changes clear these summaries, and a new calendar interval replaces its period's entry.
+Day-key parsing uses a process-local `NSCache` with an 800-entry target to reuse dates across period queries.
 
 `StorageKeys` is the single registry for persisted Token Bar state.
 Launch migration imports only the reusable snapshot from QuotaBar Lite and removes superseded Token Bar cache generations from the current preference domain.

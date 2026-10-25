@@ -27,7 +27,7 @@ enum ProviderPresentation: String, CaseIterable {
     var showsCodex: Bool { self == .codexOnly || self == .both }
 }
 
-enum ActivityPeriod {
+enum ActivityPeriod: Hashable {
     case today
     case week
     case month
@@ -83,6 +83,9 @@ struct ProviderSnapshot: Codable, Hashable {
     var nextAllowedRefreshAt: Date? = nil
     var consecutiveRateLimits: Int? = nil
     var stale: Bool? = nil
+    var weeklyResetCredits: Int? = nil
+    var resetCreditsFetched: Bool? = nil
+    var resetAccountID: String? = nil
 
     static let empty = ProviderSnapshot(
         connected: false,
@@ -145,6 +148,7 @@ struct CodexAccountSnapshot: Codable, Hashable, Identifiable {
     var invalidatedReset: Date? = nil
     var tokenActivity: TokenActivity? = nil
     var costLedger: CostLedger? = nil
+    var activityLastSuccessAt: Date? = nil
 }
 
 struct DailyUsageBucket: Codable, Hashable, Identifiable {
@@ -162,13 +166,45 @@ struct TokenActivity: Codable, Hashable {
 
     static let empty = TokenActivity(lifetimeTokens: nil, daily: [])
 
+    func supplementing(with ledger: CostLedger?) -> TokenActivity {
+        guard let recorded = ledger?.recordedTokensByDay, utcDays == true || daily.isEmpty else { return self }
+        var totals = daily.reduce(into: [String: Int64]()) {
+            $0[$1.startDate] = max($0[$1.startDate] ?? 0, $1.tokens)
+        }
+        for (day, tokens) in recorded where tokens > 0 {
+            // A reported bucket can still be partial. Local records are a floor, never an addition.
+            totals[day] = max(totals[day] ?? 0, tokens)
+        }
+        return TokenActivity(
+            lifetimeTokens: lifetimeTokens,
+            daily: totals.map { DailyUsageBucket(startDate: $0.key, tokens: $0.value) }
+                .sorted { $0.startDate < $1.startDate },
+            utcDays: true
+        )
+    }
+
     func buckets(in interval: DateInterval, calendar: Calendar = .current) -> [DailyUsageBucket] {
         daily.filter { bucket in
             let date = utcDays == true
-                ? Self.utcDayFormatter.date(from: bucket.startDate)?.addingTimeInterval(12 * 60 * 60)
-                : Self.dayFormatter.date(from: bucket.startDate).map { calendar.startOfDay(for: $0) }
+                ? Self.parsedDay(bucket.startDate, utc: true)?.addingTimeInterval(12 * 60 * 60)
+                : Self.parsedDay(bucket.startDate, utc: false).map { calendar.startOfDay(for: $0) }
             return date.map { $0 >= interval.start && $0 < interval.end } ?? false
         }
+    }
+
+    private static let parsedDays: NSCache<NSString, NSDate> = {
+        let cache = NSCache<NSString, NSDate>()
+        cache.countLimit = 800
+        return cache
+    }()
+
+    private static func parsedDay(_ day: String, utc: Bool) -> Date? {
+        let formatter = utc ? utcDayFormatter : dayFormatter
+        let key = (formatter.timeZone.identifier + ":" + day) as NSString
+        if let cached = parsedDays.object(forKey: key) { return cached as Date }
+        guard let date = formatter.date(from: day) else { return nil }
+        parsedDays.setObject(date as NSDate, forKey: key)
+        return date
     }
 
     func tokens(in interval: DateInterval, calendar: Calendar = .current) -> Int64 {
@@ -315,6 +351,8 @@ struct ModelPrice: Codable, Hashable {
     var longContextCachedInputPerToken: Double? = nil
     var longContextCacheCreationInputPerToken: Double? = nil
     var longContextOutputPerToken: Double? = nil
+    var cacheCreationInput12hPerToken: Double? = nil
+    var longContextCacheCreationInput12hPerToken: Double? = nil
 }
 
 struct PriceSourceCache: Codable, Hashable {
@@ -324,6 +362,7 @@ struct PriceSourceCache: Codable, Hashable {
     var sourceURL: String?
     var checkedModels: [String]?
     var lastAttemptAt: Date?
+    var refreshError: String? = nil
 
     static let empty = PriceSourceCache(
         fetchedAt: .distantPast,
@@ -401,6 +440,8 @@ struct CostMix: Codable, Hashable {
 
 struct CostLedger: Codable, Hashable {
     var byDay: [String: CostMix]
+    // Only dated transcript records can raise an account bucket; inferred lost-thread dates cannot.
+    var recordedTokensByDay: [String: Int64]? = nil
 
     static let empty = CostLedger(byDay: [:])
 
@@ -417,6 +458,7 @@ struct WeeklyValueEstimate: Codable, Hashable {
     var observedCostUSD: Double
     var equivalentTokens: Double
     var equivalentValueUSD: Double
+    var resetsAt: Date? = nil
 }
 
 struct WeeklyTokenCapacityEstimate: Codable, Hashable {
@@ -558,6 +600,7 @@ struct CodexWindowCursor: Codable, Hashable {
     var suppressingForkCopies: Bool?
     var forkCopyAnchor: Date?
     var serviceTier: String? = nil
+    var creatorAccountID: String? = nil
 }
 
 struct CodexWindowLedger: Codable, Hashable {
@@ -571,6 +614,9 @@ struct CodexWindowLedger: Codable, Hashable {
     var isComplete: Bool
     // Each session's latest cumulative total, so a deleted file adds only usage after the last scan.
     var rolloutTotals: [String: Int64]
+    var unreconciledMessageHashes: Set<UInt64>? = nil
+    // The login whose sessions were counted; a ledger saved for another login is rebuilt.
+    var accountID: String? = nil
 
     static func empty(windowStartedAt: Date, resetsAt: Date, observedAt: Date) -> Self {
         Self(
@@ -622,6 +668,10 @@ struct CodexUsageLedger: Codable, Hashable {
     var parseErrors: Int
     // Each session's latest cumulative total and the UTC day it was read, so a deleted file adds only later usage.
     var rolloutTotals: [String: RolloutTotal]
+    var unreconciledMessageHashesByDay: [String: Set<UInt64>]? = nil
+    var recordedTokensByDay: [String: Int64]? = nil
+    // The login whose sessions were counted; a ledger saved for another login is rebuilt.
+    var accountID: String? = nil
 
     static let empty = CodexUsageLedger(
         cursors: [:],
@@ -633,6 +683,42 @@ struct CodexUsageLedger: Codable, Hashable {
 
     var mixLedger: MixLedger {
         MixLedger(byDayAndModel: byDayAndModel)
+    }
+
+    var unreconciledRecordCount: Int {
+        unreconciledMessageHashesByDay?.values.reduce(0) { $0 + $1.count } ?? 0
+    }
+
+    // Reuse retained history when folders first join. Overlapping histories need one replay to reconcile.
+    static func seed(from sources: [CodexUsageLedger]) -> CodexUsageLedger {
+        var result = Self.empty
+        var expected: [String: Set<UInt64>] = [:]
+        var retained = Set<UInt64>()
+        for source in sources.sorted(by: {
+            $0.mixLedger.byModel.values.reduce(0) { $0 + $1.total }
+                > $1.mixLedger.byModel.values.reduce(0) { $0 + $1.total }
+        }) {
+            let hashes = Set(source.messageHashesByDay.values.joined())
+            for (day, hashes) in source.messageHashesByDay { expected[day, default: []].formUnion(hashes) }
+            for (day, hashes) in source.unreconciledMessageHashesByDay ?? [:] { expected[day, default: []].formUnion(hashes) }
+            for (session, total) in source.rolloutTotals {
+                if total.tokens > (result.rolloutTotals[session]?.tokens ?? -1) {
+                    result.rolloutTotals[session] = total
+                }
+            }
+            guard retained.isDisjoint(with: hashes) else { continue }
+            retained.formUnion(hashes)
+            for (day, models) in source.byDayAndModel {
+                for (model, tokens) in models {
+                    result.byDayAndModel[day, default: [:]][model, default: TokenBreakdown()].add(tokens)
+                }
+            }
+            for (day, hashes) in source.messageHashesByDay {
+                result.messageHashesByDay[day, default: []].formUnion(hashes)
+            }
+        }
+        result.unreconciledMessageHashesByDay = expected.mapValues { $0.subtracting(retained) }.filter { !$0.value.isEmpty }
+        return result
     }
 }
 

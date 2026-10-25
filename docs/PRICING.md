@@ -15,6 +15,9 @@ Official rows override fallback rows.
 The app checks official sources at most once every 24 hours and refreshes sooner when logs contain a missing model.
 The fallback catalog is requested only for models missing from both official sources, at most weekly.
 Each source keeps its own ETag, retry time, and last-known-good rows.
+OpenAI tables are read by column name, including the separate legacy-model table within each speed tier.
+One refresh reuses its decoded price catalog and daily history across accounts.
+Failed price refreshes retain saved rates, appear in the existing status tooltip, and wait at least 15 minutes before another attempt.
 
 Unknown models stay unpriced.
 Token Bar extrapolates a period's priced mix only when known prices cover at least 99.9% of its local sample.
@@ -35,6 +38,8 @@ model cost =
 The Codex parser avoids charging reasoning twice when output already includes it.
 Older Claude records without cache duration use the standard cache-write rate for the unsplit remainder.
 Codex input includes cache reads and writes, so both are subtracted before pricing ordinary input; Claude input excludes them.
+Current OpenAI prices distinguish 30-minute and 12-hour writes, but Codex rollout totals do not identify the write lifetime.
+When a model has different write rates and its records contain writes without that lifetime, those tokens remain unpriced instead of assuming the cheaper rate.
 
 Recorded Fast and Ultrafast requests use the provider's published rows for that speed, not a fixed multiplier.
 Claude's fast table lists input and output only, so its cache rates scale with the fast input rate.
@@ -55,7 +60,19 @@ All period cost = Claude period cost + Codex period cost
 Claude token totals and price mix come from the same local records.
 Codex token totals sum each signed-in account's daily buckets, which cover every device and report UTC days.
 Each bucket belongs to the local day that contains its midpoint, and is priced with the same UTC day's mix from that account's Codex folder.
+Each UTC day uses the larger of its reported account total and its deduplicated local record total.
+This covers absent dates, gaps between reported dates, and a present bucket that is still incomplete.
+Reported and local totals are never added for the same day; the account total takes over when it catches up.
+Local totals remain provisional, can omit other devices, and retain the same UTC-day assignment as account buckets.
+Only dated transcript records supply this floor; lost-thread totals reconstructed from database update times affect the estimated price mix but cannot raise a daily account bucket.
+A Codex folder counts only sessions and lost threads whose `creator_account_id` is its own login or absent, so sessions copied in from another account's folder stay with that account.
+Each saved Codex ledger records the login it counted and is rebuilt once when that login differs.
+Directories confirmed as the same account share a calendar ledger and current-window scan, using the existing message identities to deduplicate copied sessions.
+The newest successful activity response supplies the account buckets independently of quota-row freshness.
+When directories first join, retained disjoint history is reused and overlapping source files are replayed once.
+If missing source files prevent reconciliation of overlapping retained history, local totals are marked incomplete and the affected weekly projection is unavailable.
 A thread whose rollout file is gone joins Codex mixes and current-window samples from the folder's `state_5.sqlite` thread table.
+While no connection holds that database's `-shm` file, a read-only open of the WAL database would fail, so Token Bar opens it as immutable.
 Its `tokens_used`, less the cumulative total the last scan of that session read, is split like the same model's local token categories.
 A spawned subagent thread lost before any scan is skipped, because its total starts with its parent's.
 Days without a usable local mix use the period's average rate.
@@ -73,6 +90,7 @@ A falling weekly percentage within one reset window invalidates that window's pr
 It does not multiply a previous window's token capacity by the current model mix; quota consumption can change when the model mix changes.
 If the account counter has not increased or still trails a complete local weekly ledger, Codex uses that local ledger.
 The estimate stays unavailable without a current-window sample or priced model mix, instead of preserving a stale dollar amount.
+Every displayed weekly estimate is bound to its reset time and current percentage; stale or expired readings are excluded.
 With several accounts, a provider header sums each account's available estimate, counting the same login once.
 Extra accounts project only their own current-window records, without the primary Claude account's smoothing.
 

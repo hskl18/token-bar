@@ -1,10 +1,10 @@
 import Foundation
 
-struct PriceCatalog {
-    private enum SourceKind {
-        case openAI
-        case claude
-        case fallback
+final class PriceCatalog {
+    private enum SourceKind: String {
+        case openAI = "OpenAI"
+        case claude = "Claude"
+        case fallback = "Fallback"
     }
 
     private let maxAge: TimeInterval = 24 * 60 * 60
@@ -13,6 +13,14 @@ struct PriceCatalog {
     static let claudeURL = "https://platform.claude.com/docs/en/about-claude/pricing.md"
     static let defaultFallbackURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
     private let defaults: UserDefaults
+    private var cachedPrices: PriceCache?
+    private var cachedHistory: [String: [String: ModelPrice]]?
+    private var refreshErrors: [SourceKind: String] = [:]
+
+    var refreshWarning: String? {
+        let messages = refreshErrors.map { "\($0.key.rawValue) prices: \($0.value)" }.sorted()
+        return messages.isEmpty ? nil : messages.joined(separator: "; ")
+    }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -23,16 +31,16 @@ struct PriceCatalog {
     }
 
     func costLedger(for ledger: MixLedger) async -> CostLedger {
-        let observedModels = Set(ledger.byModel.keys.map(UsagePriceKey.model))
+        let observedModels = Set(ledger.byModel.keys.map { UsagePriceKey.model($0) + UsagePriceKey.speed($0) })
         guard !observedModels.isEmpty else { return .empty }
 
         var cache = loadCache()
         cache = await refreshed(cache, requiredModels: observedModels)
         let prices = mergedPrices(from: cache)
-        let oldHistory = defaults.data(forKey: StorageKeys.priceHistory)
-        var history = oldHistory.flatMap {
+        let oldHistory = cachedHistory ?? defaults.data(forKey: StorageKeys.priceHistory).flatMap {
             try? JSONDecoder().decode([String: [String: ModelPrice]].self, from: $0)
         } ?? [:]
+        var history = oldHistory
         var byDay: [String: CostMix] = [:]
         for (day, models) in ledger.byDayAndModel {
             var dayPrices = history[day] ?? [:]
@@ -42,11 +50,12 @@ struct PriceCatalog {
                 for (key, resolved) in rows where dayPrices[key] == nil { dayPrices[key] = resolved }
             }
             history[day] = dayPrices
-            byDay[day] = pricedMix(for: models, prices: dayPrices)
+            byDay[day] = pricedMix(for: models, prices: dayPrices, currentPrices: prices)
         }
         let retainedDays = Set(history.keys.sorted().suffix(400))
         history = history.filter { retainedDays.contains($0.key) }
-        if let data = try? JSONEncoder().encode(history), data != oldHistory {
+        cachedHistory = history
+        if history != oldHistory, let data = try? JSONEncoder().encode(history) {
             defaults.set(data, forKey: StorageKeys.priceHistory)
         }
         return CostLedger(byDay: byDay)
@@ -54,7 +63,8 @@ struct PriceCatalog {
 
     private func pricedMix(
         for models: [String: TokenBreakdown],
-        prices: [String: ModelPrice]
+        prices: [String: ModelPrice],
+        currentPrices: [String: ModelPrice]
     ) -> CostMix {
 
         var sampledTokens: Int64 = 0
@@ -75,8 +85,20 @@ struct PriceCatalog {
                 price.inputPerToken = input
                 price.cachedInputPerToken = cached
                 price.cacheCreationInputPerToken = writes
+                price.cacheCreationInput12hPerToken = price.longContextCacheCreationInput12hPerToken
                 price.outputPerToken = output
                 price.reasoningPerToken = output
+            }
+            // Codex logs a write total without its lifetime; do not invent a 30m/12h split.
+            let published = resolvedPrice(for: model, in: currentPrices)?.price
+            let publishedExtendedWrite = model.contains("|long")
+                ? published?.longContextCacheCreationInput12hPerToken : published?.cacheCreationInput12hPerToken
+            if !isClaudeModel(normalize(UsagePriceKey.model(model))), tokens.cacheCreationInput > 0,
+               let extendedWrite = price.cacheCreationInput12hPerToken ?? publishedExtendedWrite,
+               extendedWrite != price.cacheCreationInputPerToken {
+                missingModels.append(model + " (cache-write lifetime unknown)")
+                unpricedTokens += tokens.total
+                continue
             }
             let cacheCreation5m = tokens.cacheCreationInput5m ?? 0
             let cacheCreation1h = tokens.cacheCreationInput1h ?? 0
@@ -126,8 +148,8 @@ struct PriceCatalog {
         )
         let (openAIPrices, claudePrices) = await (openAI, claude)
         let missingModels = canonicalModels.filter {
-            resolvePrice(for: $0, in: openAIPrices.models) == nil
-                && resolvePrice(for: $0, in: claudePrices.models) == nil
+            resolvedPrice(for: $0, in: openAIPrices.models) == nil
+                && resolvedPrice(for: $0, in: claudePrices.models) == nil
         }
         let fallback = await refreshedSource(
             existing.fallback,
@@ -141,6 +163,13 @@ struct PriceCatalog {
             claude: claudePrices,
             fallback: fallback
         )
+        for (kind, source, required) in [
+            (SourceKind.openAI, openAIPrices, openAIModels),
+            (.claude, claudePrices, claudeModels),
+            (.fallback, fallback, missingModels)
+        ] where !required.isEmpty {
+            refreshErrors[kind] = source.refreshError
+        }
         save(updated)
         return updated
     }
@@ -154,13 +183,13 @@ struct PriceCatalog {
         guard !requiredModels.isEmpty else { return existing }
 
         let sourceChanged = existing.sourceURL != sourceURL
-        let missing = requiredModels.filter { resolvePrice(for: $0, in: existing.models) == nil }
+        let missing = requiredModels.filter { resolvedPrice(for: $0, in: existing.models) == nil }
         let checkedModels = Set(existing.checkedModels ?? [])
         let uncheckedMissing = Set(missing).subtracting(checkedModels)
         let stale = Date().timeIntervalSince(existing.fetchedAt) >= (kind == .fallback ? 7 * maxAge : maxAge)
         let needsRefresh = stale || sourceChanged || !uncheckedMissing.isEmpty
         let recentlyAttempted = existing.lastAttemptAt.map {
-            Date().timeIntervalSince($0) < retryCooldown
+            Date().timeIntervalSince($0) < (existing.refreshError == nil ? retryCooldown : 15 * 60)
         } ?? false
         guard needsRefresh, !recentlyAttempted else { return existing }
 
@@ -180,11 +209,12 @@ struct PriceCatalog {
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         let session = URLSession(configuration: configuration)
+        defer { session.finishTasksAndInvalidate() }
 
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
-                return recordAttempt(existing)
+                return recordAttempt(existing, error: "Unrecognized response; using saved rates.")
             }
             if http.statusCode == 304 {
                 var updated = existing
@@ -192,18 +222,22 @@ struct PriceCatalog {
                 updated.sourceURL = sourceURL
                 updated.checkedModels = checkedModels.union(requiredModels).sorted()
                 updated.lastAttemptAt = Date()
+                updated.refreshError = nil
                 return updated
             }
-            guard (200..<300).contains(http.statusCode),
-                  let models = parsedModels(data, kind: kind, requiredModels: requiredModels),
+            guard (200..<300).contains(http.statusCode) else {
+                return recordAttempt(existing, error: "HTTP \(http.statusCode); using saved rates.")
+            }
+            guard let models = parsedModels(data, kind: kind, requiredModels: requiredModels),
                   !models.isEmpty else {
-                return recordAttempt(existing)
+                return recordAttempt(existing, error: "Price table could not be read; using saved rates.")
             }
 
             return PriceSourceCache(
                 fetchedAt: Date(),
                 etag: http.value(forHTTPHeaderField: "ETag"),
-                models: models,
+                models: kind == .fallback && !sourceChanged
+                    ? existing.models.merging(models) { _, updated in updated } : models,
                 sourceURL: sourceURL,
                 checkedModels: sourceChanged
                     ? requiredModels.sorted()
@@ -211,7 +245,7 @@ struct PriceCatalog {
                 lastAttemptAt: Date()
             )
         } catch {
-            return recordAttempt(existing)
+            return recordAttempt(existing, error: "Refresh failed; using saved rates.")
         }
     }
 
@@ -271,7 +305,7 @@ struct PriceCatalog {
         return nil
     }
 
-    private func parseOpenAIPrices(_ markdown: String) -> [String: ModelPrice] {
+    func parseOpenAIPrices(_ markdown: String) -> [String: ModelPrice] {
         var prices = openAITable(in: markdown, after: "### Standard pricing data")
         guard prices.count >= 3 else { return [:] }
         for (heading, speed) in [("### Fast pricing data", "|fast"), ("### Ultrafast pricing data", "|ultrafast")] {
@@ -283,40 +317,43 @@ struct PriceCatalog {
     }
 
     private func openAITable(in markdown: String, after heading: String) -> [String: ModelPrice] {
-        let rows = markdownTableRows(in: markdown, after: heading)
-        let expectedHeader = [
-            "model",
-            "short context input",
-            "short context cached input",
-            "short context cache writes",
-            "short context output"
-        ]
-        guard rows.count > 1,
-              header(rows[0], startsWith: expectedHeader) else {
-            return [:]
-        }
-
         var prices: [String: ModelPrice] = [:]
-        for cells in rows.dropFirst() where cells.count >= 5 && !isTableSeparator(cells) {
-            let model = normalize(plainModelName(cells[0]))
-            guard !model.isEmpty,
-                  let input = pricePerToken(cells[1]),
-                  let output = pricePerToken(cells[4]) else {
+        var columns: [String] = []
+        for cells in markdownTableRows(in: markdown, after: heading, allTables: true) {
+            if normalizedHeader(cells[0]) == "model" {
+                columns = cells.map(normalizedHeader)
                 continue
             }
-            let longColumns = cells.count >= 9
-            let longInput = longColumns ? pricePerToken(cells[5]) : nil
+            guard cells.count == columns.count, !isTableSeparator(cells) else { continue }
+            func rate(_ names: String...) -> Double? {
+                for name in names {
+                    if let index = columns.firstIndex(of: name), let value = pricePerToken(cells[index]) {
+                        return value
+                    }
+                }
+                return nil
+            }
+            guard let modelIndex = columns.firstIndex(of: "model") else { continue }
+            let model = normalize(plainModelName(cells[modelIndex]))
+            guard !model.isEmpty,
+                  let input = rate("short context input", "input"),
+                  let output = rate("short context output", "output") else {
+                continue
+            }
+            let longInput = rate("long context input")
             prices[model] = ModelPrice(
                 inputPerToken: input,
-                cacheCreationInputPerToken: pricePerToken(cells[3]) ?? input,
+                cacheCreationInputPerToken: rate("short context 30m write", "short context cache writes") ?? input,
                 cacheCreationInput1hPerToken: nil,
-                cachedInputPerToken: pricePerToken(cells[2]) ?? input,
+                cachedInputPerToken: rate("short context cached input", "cached input") ?? input,
                 outputPerToken: output,
                 reasoningPerToken: output,
                 longContextInputPerToken: longInput,
-                longContextCachedInputPerToken: longColumns ? pricePerToken(cells[6]) ?? longInput : nil,
-                longContextCacheCreationInputPerToken: longColumns ? pricePerToken(cells[7]) ?? longInput : nil,
-                longContextOutputPerToken: longColumns ? pricePerToken(cells[8]) : nil
+                longContextCachedInputPerToken: rate("long context cached input") ?? longInput,
+                longContextCacheCreationInputPerToken: rate("long context 30m write", "long context cache writes") ?? longInput,
+                longContextOutputPerToken: rate("long context output"),
+                cacheCreationInput12hPerToken: rate("short context 12h write"),
+                longContextCacheCreationInput12hPerToken: rate("long context 12h write")
             )
         }
         return prices
@@ -393,7 +430,7 @@ struct PriceCatalog {
             .joined(separator: " ")
     }
 
-    private func markdownTableRows(in markdown: String, after heading: String) -> [[String]] {
+    private func markdownTableRows(in markdown: String, after heading: String, allTables: Bool = false) -> [[String]] {
         let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard let headingIndex = lines.firstIndex(where: {
             $0.trimmingCharacters(in: .whitespacesAndNewlines) == heading
@@ -405,6 +442,7 @@ struct PriceCatalog {
         var foundTable = false
         for line in lines.dropFirst(headingIndex + 1) {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if allTables, trimmed.hasPrefix("#") { break }
             if trimmed.hasPrefix("|"), trimmed.hasSuffix("|") {
                 foundTable = true
                 let body = trimmed.dropFirst().dropLast()
@@ -412,7 +450,7 @@ struct PriceCatalog {
                     body.split(separator: "|", omittingEmptySubsequences: false)
                         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 )
-            } else if foundTable {
+            } else if foundTable && !allTables {
                 break
             }
         }
@@ -493,10 +531,6 @@ struct PriceCatalog {
         return prices[key].map { (key, $0) }
     }
 
-    private func resolvePrice(for model: String, in prices: [String: ModelPrice]) -> ModelPrice? {
-        priceKey(for: model, in: prices).flatMap { prices[$0] }
-    }
-
     private func priceKey(for model: String, in prices: [String: ModelPrice]) -> String? {
         let canonical = normalize(model)
         if prices[canonical] != nil { return canonical }
@@ -560,21 +594,26 @@ struct PriceCatalog {
     }
 
     private func loadCache() -> PriceCache {
+        if let cachedPrices { return cachedPrices }
         if let data = defaults.data(forKey: StorageKeys.priceCache),
            let cache = try? JSONDecoder().decode(PriceCache.self, from: data) {
+            cachedPrices = cache
             return cache
         }
         return .empty
     }
 
     private func save(_ cache: PriceCache) {
+        guard cache != cachedPrices else { return }
+        cachedPrices = cache
         guard let data = try? JSONEncoder().encode(cache) else { return }
         defaults.set(data, forKey: StorageKeys.priceCache)
     }
 
-    private func recordAttempt(_ existing: PriceSourceCache) -> PriceSourceCache {
+    private func recordAttempt(_ existing: PriceSourceCache, error: String) -> PriceSourceCache {
         var attempted = existing
         attempted.lastAttemptAt = Date()
+        attempted.refreshError = error
         return attempted
     }
 }

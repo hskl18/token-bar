@@ -6,14 +6,19 @@ enum CodexThreadTable {
     /// Adds usage since `start` from threads whose rollout file is gone, on each thread's last update's UTC day.
     /// `seen` holds the last cumulative total scanned per session, so only usage after that scan is added.
     /// Tokens are split like the same model's records in `byDayAndModel`, or in `fallback` when it has none.
+    /// With `accountID`, threads another login created are skipped, like their rollouts.
     static func addLostThreads(
-        in codexHome: URL,
+        in codexHomes: [URL],
+        accountID: String? = nil,
         since start: Date,
         seen: [String: Int64],
         to byDayAndModel: inout [String: [String: TokenBreakdown]],
         fallback: () -> MixLedger = { .empty }
     ) {
-        let threads = lostThreads(in: codexHome, updatedSince: start)
+        let threads = codexHomes.flatMap { lostThreads(in: $0, accountID: accountID, updatedSince: start) }
+            .reduce(into: [String: LostThread]()) { unique, thread in
+                if thread.tokens > (unique[thread.id]?.tokens ?? 0) { unique[thread.id] = thread }
+            }.values
         guard !threads.isEmpty else { return }
         var keysByModel = keysByModel(in: MixLedger(byDayAndModel: byDayAndModel))
         var fallbackKeys: [String: [String: TokenBreakdown]]?
@@ -60,20 +65,31 @@ enum CodexThreadTable {
         ledger.byModel.reduce(into: [:]) { $0[UsagePriceKey.model($1.key), default: [:]][$1.key] = $1.value }
     }
 
-    private static func lostThreads(in codexHome: URL, updatedSince start: Date) -> [LostThread] {
+    private static func lostThreads(in codexHome: URL, accountID: String?, updatedSince start: Date) -> [LostThread] {
         let database = codexHome.appendingPathComponent("state_5.sqlite")
         var connection: OpaquePointer?
         defer { sqlite3_close(connection) }
+        // A read-only open of this WAL database fails while no connection holds its -shm file;
+        // the last connection to close normally checkpoints every commit into the main file first.
+        let immutable = !FileManager.default.fileExists(atPath: database.path + "-shm")
         guard AccountSource.isRegularFile(database),
-              sqlite3_open_v2(database.path, &connection, SQLITE_OPEN_READONLY, nil) == SQLITE_OK
+              sqlite3_open_v2(
+                  database.absoluteString + (immutable ? "?immutable=1" : ""), &connection,
+                  SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil
+              ) == SQLITE_OK
         else { return [] }
         sqlite3_busy_timeout(connection, 1000)
         var statement: OpaquePointer?
         defer { sqlite3_finalize(statement) }
         let query = "SELECT id, rollout_path, model, tokens_used, created_at, updated_at, source, thread_source FROM threads"
-            + " WHERE updated_at >= ? AND tokens_used > 0 AND model IS NOT NULL"
+            + " WHERE updated_at >= ?1 AND tokens_used > 0 AND model IS NOT NULL"
+            + " AND (?2 IS NULL OR creator_account_id IS NULL OR creator_account_id = ?2)"
         guard sqlite3_prepare_v2(connection, query, -1, &statement, nil) == SQLITE_OK else { return [] }
         sqlite3_bind_int64(statement, 1, Int64(start.timeIntervalSince1970.rounded(.down)))
+        if let accountID {
+            // SQLITE_TRANSIENT: SQLite copies the bridged C string before this call returns.
+            sqlite3_bind_text(statement, 2, accountID, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        }
         func text(_ column: Int32) -> String? {
             sqlite3_column_text(statement, column).map { String(cString: $0) }
         }

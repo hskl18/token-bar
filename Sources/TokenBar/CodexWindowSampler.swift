@@ -3,17 +3,18 @@ import Foundation
 struct CodexWindowSampler {
     private let readChunkBytes = 1024 * 1024
     private let defaults: UserDefaults
-    private let parser = CodexTranscriptParser()
-    private let codexHome: URL
+    private let parser: CodexTranscriptParser
+    private let codexHomes: [URL]
     private let ledgerKey: String
     private let mixSampler: CodexMixSampler
 
-    init(defaults: UserDefaults = .standard, codexHome: URL? = nil) {
+    init(defaults: UserDefaults = .standard, codexHome: URL? = nil, additionalHomes: [URL] = [], accountID: String? = nil) {
         self.defaults = defaults
-        self.codexHome = codexHome ?? AccountSource.primaryDirectory(for: .codex)
-        mixSampler = CodexMixSampler(codexHome: codexHome)
-        ledgerKey = codexHome.map { StorageKeys.profileLedger(StorageKeys.codexWindowLedger, directory: $0.path) }
-            ?? StorageKeys.codexWindowLedger
+        parser = CodexTranscriptParser(accountID: accountID)
+        codexHomes = Array(Set([codexHome ?? AccountSource.primaryDirectory(for: .codex)] + additionalHomes))
+            .sorted { $0.path < $1.path }
+        mixSampler = CodexMixSampler(codexHome: codexHome, additionalHomes: additionalHomes, accountID: accountID)
+        ledgerKey = StorageKeys.codexLedger(StorageKeys.codexWindowLedger, directories: codexHomes.map(\.path))
     }
 
     /// The result also counts threads whose rollout files are gone; the saved ledger keeps only rollout records.
@@ -49,6 +50,7 @@ struct CodexWindowSampler {
         }
         ledger.observedAt = observedAt
         ledger.isComplete = false
+        ledger.accountID = parser.accountID
 
         for file in files {
             try Task.checkCancellation()
@@ -102,13 +104,14 @@ struct CodexWindowSampler {
         ledger.cursors = ledger.cursors.filter { activePaths.contains($0.key) }
         for cursor in ledger.cursors.values {
             guard let total = cursor.previousTotal?.total else { continue }
-            ledger.rolloutTotals[cursor.logicalSessionKey] = total
+            ledger.rolloutTotals[cursor.logicalSessionKey] = max(ledger.rolloutTotals[cursor.logicalSessionKey] ?? 0, total)
         }
         ledger.isComplete = true
         save(ledger)
         var result = ledger
         CodexThreadTable.addLostThreads(
-            in: codexHome, since: windowStartedAt, seen: ledger.rolloutTotals, to: &result.byDayAndModel,
+            in: codexHomes, accountID: parser.accountID, since: windowStartedAt, seen: ledger.rolloutTotals,
+            to: &result.byDayAndModel,
             fallback: mixSampler.savedMixLedger
         )
         if ledgerKey == StorageKeys.codexWindowLedger, result.parseErrors == 0, result.observedTokens > 0 {
@@ -127,8 +130,8 @@ struct CodexWindowSampler {
     }
 
     private func sessionFiles(since windowStartedAt: Date) -> [TranscriptFile] {
-        TranscriptFile.list(in: ["sessions", "archived_sessions"].map {
-            codexHome.appendingPathComponent($0)
+        TranscriptFile.list(in: codexHomes.flatMap { home in
+            ["sessions", "archived_sessions"].map { home.appendingPathComponent($0) }
         }, since: windowStartedAt)
     }
 
@@ -184,6 +187,7 @@ struct CodexWindowSampler {
             return
         }
         let hash = parser.stableHash(event.identity)
+        ledger.unreconciledMessageHashes?.remove(hash)
         guard ledger.messageHashes.insert(hash).inserted else { return }
 
         var models = ledger.byDayAndModel[event.day] ?? [:]
@@ -202,15 +206,37 @@ struct CodexWindowSampler {
         resetsAt: Date,
         observedAt: Date
     ) -> CodexWindowLedger {
-        guard let ledger = TranscriptCache.load(CodexWindowLedger.self, key: ledgerKey),
-              abs(ledger.windowStartedAt.timeIntervalSince(windowStartedAt)) < 2,
-              abs(ledger.resetsAt.timeIntervalSince(resetsAt)) < 2
-        else {
-            return .empty(
+        // A ledger counted for another login or window starts over.
+        func load(_ key: String) -> CodexWindowLedger? {
+            TranscriptCache.load(CodexWindowLedger.self, key: key).flatMap {
+                $0.accountID == parser.accountID
+                    && abs($0.windowStartedAt.timeIntervalSince(windowStartedAt)) < 2
+                    && abs($0.resetsAt.timeIntervalSince(resetsAt)) < 2 ? $0 : nil
+            }
+        }
+        guard let ledger = load(ledgerKey) else {
+            var ledger = CodexWindowLedger.empty(
                 windowStartedAt: windowStartedAt,
                 resetsAt: resetsAt,
                 observedAt: observedAt
             )
+            guard codexHomes.count > 1 else { return ledger }
+            let sources = codexHomes.compactMap { home -> CodexUsageLedger? in
+                guard let saved = load(StorageKeys.codexLedger(StorageKeys.codexWindowLedger, directories: [home.path]))
+                else { return nil }
+                return CodexUsageLedger(
+                    cursors: [:], byDayAndModel: saved.byDayAndModel,
+                    messageHashesByDay: ["window": saved.messageHashes], parseErrors: 0,
+                    rolloutTotals: saved.rolloutTotals.mapValues { RolloutTotal(day: "", tokens: $0) },
+                    unreconciledMessageHashesByDay: ["window": saved.unreconciledMessageHashes ?? []]
+                )
+            }
+            let seed = CodexUsageLedger.seed(from: sources)
+            ledger.byDayAndModel = seed.byDayAndModel
+            ledger.messageHashes = Set(seed.messageHashesByDay.values.joined())
+            ledger.rolloutTotals = seed.rolloutTotals.mapValues(\.tokens)
+            ledger.unreconciledMessageHashes = Set((seed.unreconciledMessageHashesByDay ?? [:]).values.joined())
+            return ledger
         }
         return ledger
     }

@@ -6,6 +6,7 @@ Start with the page that matches your question.
 | --- | --- |
 | Formulas, prices, and estimate limits | [Pricing and calculation](PRICING.md) |
 | Claude OAuth recovery, rate limits, and local history | [Claude usage accuracy](CLAUDE-USAGE.md) |
+| Available weekly reset credits and provider boundaries | [Weekly reset credits](RESET-CREDITS.md) |
 | Components, schemas, storage, and performance | [Architecture](ARCHITECTURE.md) |
 | Requirements, local builds, and checks | [Development](DEVELOPMENT.md) |
 | Liquid Glass, geometry, and colors | [Design](DESIGN.md) |

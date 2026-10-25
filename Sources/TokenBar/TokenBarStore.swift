@@ -1,10 +1,17 @@
+import AppKit
 import Combine
 import Foundation
 
 @MainActor
 final class TokenBarStore: ObservableObject {
-    @Published var snapshot: AppSnapshot = .empty
+    @Published var snapshot: AppSnapshot = .empty {
+        didSet {
+            activitySummaries.removeAll(keepingCapacity: true)
+            codexActivityCache = nil
+        }
+    }
     @Published var isRefreshing = false
+    @Published private(set) var isResettingQuota = false
     @Published private(set) var estimateFailures: [String: String] = [:]
 
     private let freshnessInterval: TimeInterval = 3 * 60
@@ -17,6 +24,16 @@ final class TokenBarStore: ObservableObject {
     private var claudeDirectories: [URL] = []
     private var codexProfiles: [CodexAccountProfile] = []
     private let environmentSources: [AccountSource]
+    // Rendering and hover text share totals; a new snapshot or calendar interval replaces them.
+    private var activitySummaries: [ProviderScope: [ActivityPeriod: ActivitySummary]] = [:]
+    private var codexActivityCache: [(activity: TokenActivity, ledger: CostLedger?)]?
+
+    private struct ActivitySummary {
+        let interval: DateInterval
+        let tokens: Int64
+        let estimatedCost: Double?
+        let unmatchedTokens: Int64
+    }
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         previewScenario = PreviewScenario.current(environment: environment)
@@ -41,9 +58,12 @@ final class TokenBarStore: ObservableObject {
         guard previewScenario == nil else { return }
         refresh(
             force: snapshot.updatedAt == nil
-                || snapshot.codexCostLedger == nil
+                || snapshot.codexCostLedger?.recordedTokensByDay == nil
+                || (snapshot.additionalCodexAccounts ?? []).contains { $0.costLedger?.recordedTokensByDay == nil }
                 || snapshot.claudeCostLedger == nil
                 || snapshot.imageGenerationUsage == nil
+                || snapshot.claudeWeeklyValue.map { $0.resetsAt == nil } == true
+                || snapshot.codexWeeklyValue.map { $0.resetsAt == nil } == true
                 || (snapshot.codexWeeklyEstimateSource == nil
                     && snapshot.codex.headlinePercent != nil)
         )
@@ -51,6 +71,78 @@ final class TokenBarStore: ObservableObject {
 
     func refreshIfStale() {
         refresh(force: false)
+    }
+
+    func confirmWeeklyReset(provider: ProviderScope, source: String, name: String) {
+        guard previewScenario == nil, provider != .overview, !isRefreshing, !isResettingQuota else { return }
+        let directory = URL(fileURLWithPath: (source as NSString).expandingTildeInPath).standardizedFileURL
+        let isPrimary = directory == AccountSource.primaryDirectory(for: provider)
+        let claudeProfile = isPrimary ? nil : claudeProfiles.first { $0.configDirectory == directory }
+        let accountID = provider == .claude
+            ? (isPrimary ? snapshot.claude.resetAccountID : snapshot.additionalClaudeAccounts?
+                .first { $0.sourceDirectory == directory.path }?.quota.resetAccountID)
+            : (isPrimary ? snapshot.codex.resetAccountID : snapshot.additionalCodexAccounts?
+                .first { $0.sourceDirectory == directory.path }?.quota.resetAccountID)
+        guard let accountID else {
+            let alert = NSAlert()
+            alert.messageText = "Account identity unavailable"
+            alert.informativeText = "Refresh this account before using a reset."
+            alert.runModal()
+            refresh(providers: [provider], accounts: [directory.path])
+            return
+        }
+
+        isResettingQuota = true
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Reset \(name)?"
+        alert.informativeText = "Use one reset credit for this account? This cannot be undone.\n\n\(directory.path)"
+        alert.addButton(withTitle: "Use 1 reset")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            isResettingQuota = false
+            return
+        }
+
+        // A quit or timeout after spending must not restore a usable cached button.
+        if isPrimary {
+            if provider == .claude { snapshot.claude.resetCreditsFetched = false }
+            else { snapshot.codex.resetCreditsFetched = false }
+        } else if provider == .claude,
+                  let index = snapshot.additionalClaudeAccounts?.firstIndex(where: { $0.sourceDirectory == directory.path }) {
+            snapshot.additionalClaudeAccounts?[index].quota.resetCreditsFetched = false
+        } else if let index = snapshot.additionalCodexAccounts?.firstIndex(where: { $0.sourceDirectory == directory.path }) {
+            snapshot.additionalCodexAccounts?[index].quota.resetCreditsFetched = false
+        }
+        saveSnapshot()
+
+        Task {
+            defer {
+                isResettingQuota = false
+                refresh(providers: [provider], accounts: [directory.path])
+            }
+            do {
+                if provider == .claude {
+                    try await ClaudeClient().consumeWeeklyReset(profile: claudeProfile, expectedAccountID: accountID)
+                } else {
+                    try await CodexAppServerClient().consumeWeeklyReset(codexHome: directory, expectedAccountID: accountID)
+                }
+            } catch {
+                let date = Date()
+                if isPrimary {
+                    if provider == .claude { recordFailure(error, in: &snapshot.claude, at: date) }
+                    else { recordFailure(error, in: &snapshot.codex, at: date) }
+                } else if provider == .claude, let claudeProfile {
+                    _ = applyClaudeAccountResults([(claudeProfile.id, .failure(error))], profiles: [claudeProfile], at: date)
+                } else if let index = snapshot.additionalCodexAccounts?.firstIndex(where: { $0.sourceDirectory == directory.path }) {
+                    applyCodexAccountResult(.failure(error), at: index, date: date)
+                }
+                saveSnapshot()
+                let failure = NSAlert(error: error)
+                failure.messageText = "Reset failed for \(name)"
+                failure.runModal()
+            }
+        }
     }
 
     /// Returns the configuration directories whose quota was requested.
@@ -62,7 +154,7 @@ final class TokenBarStore: ObservableObject {
         accounts: Set<String>? = nil,
         scanLocal: Bool = false
     ) -> Set<String> {
-        guard previewScenario == nil, !isRefreshing else { return [] }
+        guard previewScenario == nil, !isRefreshing, !isResettingQuota else { return [] }
 
         let attemptedAt = Date()
         let profilesChanged = (force || profileSyncAt.map {
@@ -90,10 +182,14 @@ final class TokenBarStore: ObservableObject {
             return includes(.codex, profile.configDirectory) && shouldAttempt(quota, force: force, at: attemptedAt)
         }
         let shouldScanCodex = scanCodex && (scanLocal || shouldRefreshCodex)
+        let codexProfilesToScan = codexProfiles.filter { profile in
+            includes(.codex, profile.configDirectory)
+                && (scanLocal || codexAccountsToRefresh.contains(where: { $0.id == profile.id }))
+        }
         let shouldScanClaude = ([claudeHome] + claudeDirectories).contains { includes(.claude, $0) }
             && (scanLocal || shouldRefreshClaude || !claudeAccountsToRefresh.isEmpty)
         guard shouldScanCodex || shouldScanClaude
-                || !claudeAccountsToRefresh.isEmpty || !codexAccountsToRefresh.isEmpty
+                || !claudeAccountsToRefresh.isEmpty || !codexProfilesToScan.isEmpty
         else {
             if profilesChanged { saveSnapshot() }
             return []
@@ -143,22 +239,20 @@ final class TokenBarStore: ObservableObject {
             async let additionalCodexResults = fetchCodexAccounts(codexAccountsToRefresh, readings: codexReadings)
             async let claudeLedgerResult: ClaudeUsageLedger? = shouldScanClaude
                 ? ClaudeMixSampler(configDirectories: [claudeHome] + claudeDirectories).update() : nil
-            async let codexUsageLedgerResult: CodexUsageLedger? = shouldScanCodex
-                ? CodexMixSampler().update() : nil
             async let imageUsageResult: ImageGenerationUsage? = shouldScanCodex
                 ? ImageGenerationSampler().update() : nil
 
-            let (codex, claude, additionalClaude, additionalCodex, claudeLedger, codexUsageLedger, imageUsage) = await (
+            let (codex, claude, additionalClaude, additionalCodex, claudeLedger, imageUsage) = await (
                 codexResult,
                 claudeResult,
                 additionalClaudeResults,
                 additionalCodexResults,
                 claudeLedgerResult,
-                codexUsageLedgerResult,
                 imageUsageResult
             )
             guard !Task.isCancelled, refreshGeneration == generation else { return }
             if let imageUsage { snapshot.imageGenerationUsage = imageUsage }
+            let catalog = PriceCatalog()
 
             var officialCodexActivity: TokenActivity?
             var codexSucceeded = false
@@ -199,6 +293,86 @@ final class TokenBarStore: ObservableObject {
                     snapshot.codexActivityError = error.localizedDescription
                 }
             }
+            for (id, result) in additionalCodex {
+                if let index = snapshot.additionalCodexAccounts?.firstIndex(where: { $0.id == id }) {
+                    applyCodexAccountResult(result, at: index, date: attemptedAt)
+                }
+            }
+            // A successful reading belongs to the login, including aliases not polled this refresh.
+            let readings = [(snapshot.codexAccountID, snapshot.codex)]
+                + (snapshot.additionalCodexAccounts ?? []).map { ($0.accountID, $0.quota) }
+            let freshQuotas = Dictionary(readings.compactMap { id, quota -> (String, ProviderSnapshot)? in
+                guard let id, !quota.isStale, quota.lastSuccessAt == attemptedAt else { return nil }
+                return (id, quota)
+            }, uniquingKeysWith: { first, _ in first })
+            if let id = snapshot.codexAccountID, let quota = freshQuotas[id] {
+                if let reset = droppedWeeklyReset(from: snapshot.codex, to: quota) {
+                    snapshot.codexWeeklyInvalidatedReset = reset
+                    snapshot.codexAccountWindowBaselines = []
+                }
+                snapshot.codex = quota
+                codexSucceeded = true
+                if officialCodexActivity == nil, let reading = snapshot.additionalCodexAccounts?.first(where: {
+                    $0.accountID == id && $0.activityLastSuccessAt == attemptedAt
+                }) {
+                    officialCodexActivity = reading.tokenActivity
+                    snapshot.codexActivityLastSuccessAt = attemptedAt
+                    snapshot.codexActivityError = nil
+                }
+            }
+            for index in (snapshot.additionalCodexAccounts ?? []).indices {
+                guard let account = snapshot.additionalCodexAccounts?[index],
+                      let id = account.accountID, let quota = freshQuotas[id] else { continue }
+                if let reset = droppedWeeklyReset(from: account.quota, to: quota) {
+                    snapshot.additionalCodexAccounts?[index].invalidatedReset = reset
+                }
+                snapshot.additionalCodexAccounts?[index].quota = quota
+            }
+
+            var codexUsageLedger: CodexUsageLedger?
+            var scannedGroups = Set<String>()
+            let changedCodexHomes = (shouldScanCodex ? [codexHome] : []) + codexProfilesToScan.map(\.configDirectory)
+            for directory in changedCodexHomes {
+                let (homes, accountID) = codexDirectories(for: directory)
+                let groupKey = homes.map(\.path).joined(separator: "\n")
+                guard scannedGroups.insert(groupKey).inserted else { continue }
+                let usage = await CodexMixSampler(codexHome: directory, additionalHomes: homes, accountID: accountID).update()
+                var costLedger = await catalog.costLedger(for: usage.mixLedger)
+                costLedger.recordedTokensByDay = usage.recordedTokensByDay
+                guard !Task.isCancelled, refreshGeneration == generation else { return }
+                for home in homes { estimateFailures[AccountSource.title(for: home) + " local records"] = nil }
+                let warningKey = AccountSource.title(for: homes[0]) + " local records"
+                let missing = usage.unreconciledRecordCount
+                estimateFailures[warningKey] = missing > 0
+                    ? "\(missing) retained records need missing source logs to reconcile overlapping folders. Local totals are incomplete."
+                    : usage.parseErrors > 0 ? "\(usage.parseErrors) local log entries could not be read." : nil
+                if homes.contains(codexHome) {
+                    codexUsageLedger = usage
+                    if !costLedger.byDay.isEmpty { snapshot.codexCostLedger = costLedger }
+                }
+                for index in (snapshot.additionalCodexAccounts ?? []).indices {
+                    if homes.contains(where: { $0.path == snapshot.additionalCodexAccounts?[index].sourceDirectory }),
+                       !costLedger.byDay.isEmpty {
+                        snapshot.additionalCodexAccounts?[index].costLedger = costLedger
+                    }
+                }
+            }
+
+            var codexWindows: [String: Result<CodexWindowLedger, Error>] = [:]
+            @MainActor func codexWindow(for directory: URL, quota: ProviderSnapshot) async -> Result<CodexWindowLedger, Error>? {
+                guard !quota.isStale, let window = weeklyWindow(in: quota),
+                      let minutes = window.windowMinutes, let reset = window.resetsAt, reset > Date() else { return nil }
+                let (homes, accountID) = codexDirectories(for: directory)
+                let key = homes.map(\.path).joined(separator: "\n") + ":\(reset.timeIntervalSince1970):\(minutes)"
+                if let result = codexWindows[key] { return result }
+                let result = await capture {
+                    try await CodexWindowSampler(codexHome: directory, additionalHomes: homes, accountID: accountID).update(
+                        windowStartedAt: reset.addingTimeInterval(-Double(minutes) * 60), resetsAt: reset
+                    )
+                }
+                codexWindows[key] = result
+                return result
+            }
 
             var claudeSucceeded = false
             var idleClaudeProfiles: [ClaudeAccountProfile?] = []
@@ -220,42 +394,40 @@ final class TokenBarStore: ObservableObject {
             for profile in claudeAccountsToRefresh {
                 guard let quota = snapshot.additionalClaudeAccounts?.first(where: { $0.id == profile.id })?.quota
                 else { continue }
-                let weeklyValue = await profileWeeklyValue(.claude, quota: quota, directory: profile.configDirectory)
+                let weeklyValue = await claudeProfileWeeklyValue(quota: quota, directory: profile.configDirectory, catalog: catalog)
                 guard !Task.isCancelled, refreshGeneration == generation else { return }
                 if let index = snapshot.additionalClaudeAccounts?.firstIndex(where: { $0.id == profile.id }) {
                     snapshot.additionalClaudeAccounts?[index].weeklyValue = weeklyValue
                 }
             }
-            for (id, result) in additionalCodex {
-                guard let index = snapshot.additionalCodexAccounts?.firstIndex(where: { $0.id == id }),
-                      let profile = codexAccountsToRefresh.first(where: { $0.id == id })
-                else { continue }
-                applyCodexAccountResult(result, at: index, date: attemptedAt)
-                guard let account = snapshot.additionalCodexAccounts?[index] else { continue }
-                // The calendar scan runs first because the window scan borrows its token categories.
-                let usage = await CodexMixSampler(codexHome: profile.configDirectory).update()
-                let costLedger = await PriceCatalog().costLedger(for: usage.mixLedger)
-                let weeklyValue = sameReset(weeklyWindow(in: account.quota)?.resetsAt, account.invalidatedReset)
-                    ? nil : await profileWeeklyValue(.codex, quota: account.quota, directory: profile.configDirectory)
+            var estimatedCodexGroups = Set<String>()
+            for profile in codexProfilesToScan {
+                guard let account = snapshot.additionalCodexAccounts?.first(where: { $0.id == profile.id }) else { continue }
+                let homes = codexDirectories(for: profile.configDirectory).homes
+                guard estimatedCodexGroups.insert(homes.map(\.path).joined(separator: "\n")).inserted else { continue }
+                var weeklyValue: WeeklyValueEstimate?
+                if let window = weeklyWindow(in: account.quota), window.usedPercent >= 3,
+                   !sameReset(window.resetsAt, account.invalidatedReset),
+                   case let .success(ledger)? = await codexWindow(for: profile.configDirectory, quota: account.quota),
+                   ledger.isComplete, ledger.parseErrors == 0, ledger.unreconciledMessageHashes?.isEmpty != false {
+                    let mix = await catalog.costMix(for: ledger.mixLedger)
+                    if case let .available(estimate) = weeklyValueEstimate(
+                        capacity: currentCapacity(window: window, observedTokens: ledger.observedTokens),
+                        observedTokens: ledger.observedTokens, costMix: mix, requiresExactTokenMatch: true,
+                        resetsAt: window.resetsAt
+                    ) { weeklyValue = estimate }
+                }
                 guard !Task.isCancelled, refreshGeneration == generation else { return }
-                if let currentIndex = snapshot.additionalCodexAccounts?.firstIndex(where: { $0.id == id }) {
-                    snapshot.additionalCodexAccounts?[currentIndex].weeklyValue = weeklyValue
-                    if !costLedger.byDay.isEmpty { snapshot.additionalCodexAccounts?[currentIndex].costLedger = costLedger }
+                for index in (snapshot.additionalCodexAccounts ?? []).indices {
+                    if homes.contains(where: { $0.path == snapshot.additionalCodexAccounts?[index].sourceDirectory }) {
+                        snapshot.additionalCodexAccounts?[index].weeklyValue = weeklyValue
+                    }
                 }
             }
 
             var codexWindowResult: Result<CodexWindowLedger, Error>?
-            if codexSucceeded,
-               let weeklyWindow = weeklyWindow(in: snapshot.codex),
-               let durationMinutes = weeklyWindow.windowMinutes,
-               let resetsAt = weeklyWindow.resetsAt {
-                let windowStartedAt = resetsAt.addingTimeInterval(-Double(durationMinutes) * 60)
-                codexWindowResult = await capture {
-                    try await CodexWindowSampler().update(
-                        windowStartedAt: windowStartedAt,
-                        resetsAt: resetsAt
-                    )
-                }
+            if codexSucceeded {
+                codexWindowResult = await codexWindow(for: codexHome, quota: snapshot.codex)
             }
 
             var claudeWindowResult: Result<ClaudeWindowLedger, Error>?
@@ -281,7 +453,6 @@ final class TokenBarStore: ObservableObject {
                 guard case let .success(ledger)? = claudeWindowResult else { return nil }
                 return ledger
             }()
-            let codexCalendarLedger = codexUsageLedger?.mixLedger ?? .empty
             let codexLedger: MixLedger = {
                 guard codexUsageLedger != nil else { return .empty }
                 if let codexWindowLedger, codexWindowLedger.observedTokens > 0 {
@@ -290,16 +461,10 @@ final class TokenBarStore: ObservableObject {
                 return CodexWindowSampler().lastKnownMixLedger() ?? .empty
             }()
             let claudeMixLedger = claudeLedger.map(mixLedger(from:)) ?? .empty
-            let catalog = PriceCatalog()
-            _ = await catalog.costMix(for: mergedLedger(
-                mergedLedger(codexCalendarLedger, codexLedger), claudeMixLedger
-            ))
             if codexUsageLedger != nil {
                 let codexMix = await catalog.costMix(for: codexLedger)
-                let codexCostLedger = await catalog.costLedger(for: codexCalendarLedger)
                 guard !Task.isCancelled, refreshGeneration == generation else { return }
                 if !codexLedger.byModel.isEmpty { snapshot.costMix = codexMix }
-                if !codexCostLedger.byDay.isEmpty { snapshot.codexCostLedger = codexCostLedger }
                 if codexSucceeded {
                     let codexWeeklyMix = (codexWindowLedger?.observedTokens ?? 0) > 0
                         ? codexMix : .empty
@@ -334,6 +499,7 @@ final class TokenBarStore: ObservableObject {
             if let officialCodexActivity {
                 snapshot.tokenActivity = officialCodexActivity
             }
+            estimateFailures["Prices"] = catalog.refreshWarning
             snapshot.updatedAt = ([
                 snapshot.claude.lastSuccessAt,
                 snapshot.codex.lastSuccessAt,
@@ -392,30 +558,67 @@ final class TokenBarStore: ObservableObject {
     }
 
     func tokens(for provider: ProviderScope, period: ActivityPeriod) -> Int64 {
-        let interval = period.interval()
-        guard provider == .codex else { return tokenActivity(for: provider).tokens(in: interval) }
-        return codexUsage.reduce(0) { $0 + $1.activity.tokens(in: interval) }
+        activitySummary(for: provider, period: period).tokens
     }
 
     func estimatedCost(for provider: ProviderScope, period: ActivityPeriod) -> Double? {
-        let interval = period.interval()
-        guard provider == .codex else {
-            let activity = tokenActivity(for: provider)
-            let mix = snapshot.claudeCostLedger?.mix(for: activity.dayKeys(in: interval)) ?? .empty
-            return mix.estimate(tokens: activity.tokens(in: interval))
-        }
-        let imageCost = snapshot.imageGenerationUsage?.cost(in: interval) ?? 0
-        return codexCost(in: interval).usd.map { $0 + imageCost }
+        activitySummary(for: provider, period: period).estimatedCost
     }
 
-    // Each Codex login once, picked like the quota rows so a fresh duplicate replaces a stale primary.
+    private func activitySummary(for provider: ProviderScope, period: ActivityPeriod) -> ActivitySummary {
+        let interval = period.interval()
+        if let cached = activitySummaries[provider]?[period], cached.interval == interval { return cached }
+        let summary: ActivitySummary
+        if provider == .codex {
+            let cost = codexCost(in: interval)
+            let imageCost = snapshot.imageGenerationUsage?.cost(in: interval) ?? 0
+            summary = ActivitySummary(
+                interval: interval,
+                tokens: codexUsage.reduce(0) { $0 + $1.activity.tokens(in: interval) },
+                estimatedCost: cost.usd.map { $0 + imageCost },
+                unmatchedTokens: cost.unmatchedTokens
+            )
+        } else {
+            let activity = tokenActivity(for: provider)
+            let mix = snapshot.claudeCostLedger?.mix(for: activity.dayKeys(in: interval)) ?? .empty
+            let tokens = activity.tokens(in: interval)
+            summary = ActivitySummary(
+                interval: interval, tokens: tokens, estimatedCost: mix.estimate(tokens: tokens), unmatchedTokens: 0
+            )
+        }
+        activitySummaries[provider, default: [:]][period] = summary
+        return summary
+    }
+
+    // Activity freshness is independent of quota freshness. Each login contributes one account total.
     private var codexUsage: [(activity: TokenActivity, ledger: CostLedger?)] {
-        (snapshot.primaryCodexYields ? [] : [(snapshot.tokenActivity, snapshot.codexCostLedger)])
-            + snapshot.visibleCodexAccounts.compactMap { account in
-                // Without an account ID, a folder could repeat the primary login.
-                guard account.accountID != nil, let activity = account.tokenActivity else { return nil }
-                return (activity, account.costLedger)
+        if let codexActivityCache { return codexActivityCache }
+        let accounts = [(id: snapshot.codexAccountID ?? "primary", activity: snapshot.tokenActivity,
+                         ledger: snapshot.codexCostLedger, date: snapshot.codexActivityLastSuccessAt ?? .distantPast)]
+            + (snapshot.additionalCodexAccounts ?? []).compactMap { account in
+                guard let id = account.accountID else { return nil }
+                return (id, account.tokenActivity ?? .empty, account.costLedger,
+                        account.activityLastSuccessAt ?? .distantPast)
             }
+        let usage = Dictionary(grouping: accounts, by: \.id).values.map { readings in
+            let activity = readings.max { $0.date < $1.date }?.activity ?? .empty
+            let ledger = readings.compactMap(\.ledger).max {
+                $0.overall.sampledTokens < $1.overall.sampledTokens
+            }
+            return (activity.supplementing(with: ledger), ledger)
+        }
+        codexActivityCache = usage
+        return usage
+    }
+
+    private func codexDirectories(for directory: URL) -> (homes: [URL], accountID: String?) {
+        let primary = AccountSource.primaryDirectory(for: .codex)
+        let candidates: [(directory: String, account: String?)] = [(primary.path, snapshot.codexAccountID)]
+            + (snapshot.additionalCodexAccounts ?? []).map { ($0.sourceDirectory, $0.accountID) }
+        guard let id = candidates.first(where: { $0.directory == directory.path })?.account else { return ([directory], nil) }
+        return (candidates.filter { $0.account == id }
+            .map { URL(fileURLWithPath: $0.directory, isDirectory: true) }
+            .sorted { $0.path < $1.path }, id)
     }
 
     // An account with no local mix in the period, such as one used only elsewhere, takes the others' rate;
@@ -499,7 +702,8 @@ final class TokenBarStore: ObservableObject {
         case .overview:
             return []
         case .claude:
-            return [snapshot.claudeWeeklyValue].compactMap { $0 }.map { (snapshot.claudeAccountID, $0) }
+            return [currentEstimate(snapshot.claudeWeeklyValue, quota: snapshot.claude, allowsPrior: true)]
+                .compactMap { $0 }.map { (snapshot.claudeAccountID, $0) }
                 + (snapshot.additionalClaudeAccounts ?? []).compactMap { account in
                     currentEstimate(account.weeklyValue, quota: account.quota).map { (account.id, $0) }
                 }
@@ -533,10 +737,13 @@ final class TokenBarStore: ObservableObject {
     }
 
     // A cached estimate counts only while it still describes the account's live weekly window.
-    private func currentEstimate(_ estimate: WeeklyValueEstimate?, quota: ProviderSnapshot) -> WeeklyValueEstimate? {
+    private func currentEstimate(
+        _ estimate: WeeklyValueEstimate?, quota: ProviderSnapshot, allowsPrior: Bool = false
+    ) -> WeeklyValueEstimate? {
         guard let estimate, !quota.isStale, let window = weeklyWindow(in: quota),
               let reset = window.resetsAt, reset > Date(),
-              window.usedPercent >= 3, estimate.usedPercent == window.usedPercent
+              (allowsPrior || window.usedPercent >= 3), estimate.usedPercent == window.usedPercent,
+              previewScenario != nil || sameReset(estimate.resetsAt, reset)
         else { return nil }
         return estimate
     }
@@ -547,8 +754,10 @@ final class TokenBarStore: ObservableObject {
         let utcDayStart = utc.startOfDay(for: Date()).formatted(date: .omitted, time: .shortened)
         var codexScope = "Codex tokens are each OpenAI account's totals by UTC day, which starts at \(utcDayStart) local time."
             + " Dollars price each account's day with that UTC day's local model mix from its Codex folder."
-        let cost = codexCost(in: period.interval())
-        if cost.unmatchedTokens > 0, cost.usd != nil {
+            + " Each day uses the larger of the account total and this Mac's deduplicated records, never their sum."
+            + " Local totals remain provisional while account reporting lags; other devices may be missing."
+        let cost = activitySummary(for: .codex, period: period)
+        if cost.unmatchedTokens > 0, cost.estimatedCost != nil {
             codexScope += " \(compactTokens(cost.unmatchedTokens)) tokens fall on days without local model records"
                 + " and use this period's average rate."
         }
@@ -644,7 +853,8 @@ final class TokenBarStore: ObservableObject {
             capacity: capacity,
             observedTokens: ledger.observedTokens,
             costMix: costMix,
-            requiresExactTokenMatch: true
+            requiresExactTokenMatch: true,
+            resetsAt: window.resetsAt
         )
         switch status {
         case let .available(estimate):
@@ -672,6 +882,10 @@ final class TokenBarStore: ObservableObject {
               let resetsAt = window.resetsAt
         else {
             snapshot.codexWeeklyValueError = "Weekly usage is unavailable."
+            return
+        }
+        guard localLedger?.unreconciledMessageHashes?.isEmpty != false else {
+            snapshot.codexWeeklyValueError = "Overlapping local histories cannot be fully reconciled without their missing logs."
             return
         }
         guard let lifetimeTokens = activity?.lifetimeTokens else {
@@ -740,7 +954,8 @@ final class TokenBarStore: ObservableObject {
             capacity: capacity,
             observedTokens: observedTokens,
             costMix: costMix,
-            requiresExactTokenMatch: false
+            requiresExactTokenMatch: false,
+            resetsAt: window.resetsAt
         )
         switch status {
         case let .available(estimate):
@@ -793,7 +1008,8 @@ final class TokenBarStore: ObservableObject {
             capacity: capacity,
             observedTokens: ledger.observedTokens,
             costMix: costMix,
-            requiresExactTokenMatch: true
+            requiresExactTokenMatch: true,
+            resetsAt: window.resetsAt
         )
         switch status {
         case let .available(estimate):
@@ -880,6 +1096,8 @@ final class TokenBarStore: ObservableObject {
                     account.quota = .empty
                     account.invalidatedReset = nil
                     account.tokenActivity = nil
+                    account.costLedger = nil
+                    account.activityLastSuccessAt = nil
                 }
                 account.accountID = accountID
             }
@@ -899,6 +1117,7 @@ final class TokenBarStore: ObservableObject {
                 account.tokenActivity = TokenActivity(
                     lifetimeTokens: activity.lifetimeTokens, daily: recentBuckets(activity.daily), utcDays: true
                 )
+                account.activityLastSuccessAt = date
                 estimateFailures["\(account.name) usage"] = nil
             case let .failure(error):
                 let message = error.localizedDescription
@@ -911,26 +1130,21 @@ final class TokenBarStore: ObservableObject {
     }
 
     /// An extra account's estimate from its own current-window records, without cross-window smoothing.
-    private func profileWeeklyValue(
-        _ provider: ProviderScope, quota: ProviderSnapshot, directory: URL
+    private func claudeProfileWeeklyValue(
+        quota: ProviderSnapshot, directory: URL, catalog: PriceCatalog
     ) async -> WeeklyValueEstimate? {
         guard !quota.isStale, let window = weeklyWindow(in: quota), window.usedPercent >= 3,
               let minutes = window.windowMinutes, let reset = window.resetsAt, reset > Date()
         else { return nil }
         let start = reset.addingTimeInterval(-Double(minutes) * 60)
-        let ledger: (mix: MixLedger, tokens: Int64)?
-        if provider == .claude {
-            ledger = (try? await ClaudeWindowSampler(configDirectory: directory).update(windowStartedAt: start, resetsAt: reset))
-                .flatMap { $0.isComplete && $0.parseErrors == 0 ? ($0.mixLedger, $0.observedTokens) : nil }
-        } else {
-            ledger = (try? await CodexWindowSampler(codexHome: directory).update(windowStartedAt: start, resetsAt: reset))
-                .flatMap { $0.isComplete && $0.parseErrors == 0 ? ($0.mixLedger, $0.observedTokens) : nil }
-        }
+        let ledger: (mix: MixLedger, tokens: Int64)? = (try? await ClaudeWindowSampler(configDirectory: directory)
+            .update(windowStartedAt: start, resetsAt: reset))
+            .flatMap { $0.isComplete && $0.parseErrors == 0 ? ($0.mixLedger, $0.observedTokens) : nil }
         guard let ledger, ledger.tokens > 0 else { return nil }
-        let mix = await PriceCatalog().costMix(for: ledger.mix)
+        let mix = await catalog.costMix(for: ledger.mix)
         guard case let .available(estimate) = weeklyValueEstimate(
             capacity: currentCapacity(window: window, observedTokens: ledger.tokens),
-            observedTokens: ledger.tokens, costMix: mix, requiresExactTokenMatch: true
+            observedTokens: ledger.tokens, costMix: mix, requiresExactTokenMatch: true, resetsAt: reset
         ) else { return nil }
         return estimate
     }
@@ -956,7 +1170,8 @@ final class TokenBarStore: ObservableObject {
         capacity: WeeklyTokenCapacityEstimate?,
         observedTokens: Int64,
         costMix: CostMix,
-        requiresExactTokenMatch: Bool
+        requiresExactTokenMatch: Bool,
+        resetsAt: Date?
     ) -> WeeklyValueStatus {
         guard let capacity else {
             return .unavailable("Waiting for enough weekly observations.")
@@ -979,7 +1194,8 @@ final class TokenBarStore: ObservableObject {
             observedTokens: observedTokens,
             observedCostUSD: observedCost,
             equivalentTokens: capacity.equivalentTokens,
-            equivalentValueUSD: equivalentValue
+            equivalentValueUSD: equivalentValue,
+            resetsAt: resetsAt
         ))
     }
 
@@ -1102,6 +1318,7 @@ final class TokenBarStore: ObservableObject {
         snapshot.codexAccountID = accountID
         snapshot.codex = .empty
         snapshot.tokenActivity = .empty
+        snapshot.codexCostLedger = nil
         snapshot.codexAccountWindowBaselines = []
         snapshot.codexWeeklyInvalidatedReset = nil
         snapshot.codexWeeklyCapacity = nil
@@ -1155,13 +1372,17 @@ final class TokenBarStore: ObservableObject {
                 weeklyValue: cached?.weeklyValue,
                 invalidatedReset: cached?.invalidatedReset,
                 tokenActivity: cached?.tokenActivity,
-                costLedger: cached?.costLedger
+                costLedger: cached?.costLedger,
+                activityLastSuccessAt: cached?.activityLastSuccessAt
             )
         }
         next.additionalCodexAccounts = codexAccounts.isEmpty ? nil : codexAccounts
         // Usage warnings are keyed by account name, so drop those of folders that are gone or renamed.
-        let usageWarnings = Set(codexAccounts.map { "\($0.name) usage" })
-        estimateFailures = estimateFailures.filter { !$0.key.hasSuffix(" usage") || usageWarnings.contains($0.key) }
+        let usageWarnings = Set(codexAccounts.flatMap { ["\($0.name) usage", "\($0.name) local records"] }
+            + ["Codex local records"])
+        estimateFailures = estimateFailures.filter {
+            (!$0.key.hasSuffix(" usage") && !$0.key.hasSuffix(" local records")) || usageWarnings.contains($0.key)
+        }
         profileSyncAt = date
         guard next.claudeAccountID != snapshot.claudeAccountID
                 || next.additionalClaudeAccounts != snapshot.additionalClaudeAccounts
@@ -1239,20 +1460,6 @@ final class TokenBarStore: ObservableObject {
 
     private func mixLedger(from ledger: ClaudeUsageLedger) -> MixLedger {
         MixLedger(byDayAndModel: ledger.byDayAndModel)
-    }
-
-    private func mergedLedger(_ first: MixLedger, _ second: MixLedger) -> MixLedger {
-        var byDayAndModel = first.byDayAndModel
-        for (day, models) in second.byDayAndModel {
-            var combinedModels = byDayAndModel[day] ?? [:]
-            for (model, tokens) in models {
-                var aggregate = combinedModels[model] ?? TokenBreakdown()
-                aggregate.add(tokens)
-                combinedModels[model] = aggregate
-            }
-            byDayAndModel[day] = combinedModels
-        }
-        return MixLedger(byDayAndModel: byDayAndModel)
     }
 
     private func tokenActivity(from ledger: MixLedger) -> TokenActivity {

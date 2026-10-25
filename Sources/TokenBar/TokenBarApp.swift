@@ -70,7 +70,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusPanel = StatusPanelController(
             contentViewController: NSHostingController(
-                rootView: RootView().environmentObject(store)
+                rootView: RootView { [weak self] provider, source, name in
+                    self?.statusPanel?.hide()
+                    // Leave the menu tracking loop before entering an alert's modal loop.
+                    DispatchQueue.main.async { [weak self] in
+                        self?.store.confirmWeeklyReset(provider: provider, source: source, name: name)
+                    }
+                }.environmentObject(store)
             ),
             contentSize: TokenBarLayout.panelSize(for: store.snapshot)
         )
