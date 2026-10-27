@@ -76,6 +76,31 @@ enum CodexAppServerError: LocalizedError {
 }
 
 struct CodexAppServerClient {
+    func consumeWeeklyReset(codexHome: URL, expectedAccountID: String) async throws {
+        guard let candidate = CodexRuntimeLocator.live().candidates().first else {
+            throw CodexAppServerError.executableMissing
+        }
+        let requestID = UUID().uuidString
+        // Do not retry a spend through another runtime after an ambiguous transport failure.
+        let responses = try await Task.detached(priority: .utility) {
+            try runServer(
+                executableURL: candidate.executableURL, codexHome: codexHome,
+                includeActivity: false, readings: nil,
+                reset: (requestID: requestID, accountID: expectedAccountID)
+            )
+        }.value
+        let result = try resultDictionary(responses[5])
+        switch string(result["outcome"]) {
+        case "reset", "alreadyRedeemed": return
+        case "nothingToReset":
+            throw CodexAppServerError.server("This account has no eligible usage limit to reset. No reset was used.")
+        case "noCredit":
+            throw CodexAppServerError.server("This account has no reset credits left.")
+        default:
+            throw CodexAppServerError.invalidResponse
+        }
+    }
+
     func fetch(
         codexHome: URL? = nil, includeActivity: Bool = true, readings: CodexQuotaReadings? = nil
     ) async throws -> CodexFetchResult {
@@ -95,7 +120,11 @@ struct CodexAppServerClient {
                         readings: readings
                     )
                     let result = CodexFetchResult(
-                        quota: Result { try parseCodexQuota(responses[2]) },
+                        quota: Result {
+                            var quota = try parseCodexQuota(responses[2])
+                            quota.resetAccountID = codexAccountID(from: responses[4])
+                            return quota
+                        },
                         activity: Result { try parseActivity(responses[3]) },
                         accountID: codexAccountID(from: responses[4])
                     )
@@ -135,7 +164,8 @@ private extension CodexFetchResult {
 }
 
 private func runServer(
-    executableURL: URL, codexHome: URL?, includeActivity: Bool, readings: CodexQuotaReadings?
+    executableURL: URL, codexHome: URL?, includeActivity: Bool, readings: CodexQuotaReadings?,
+    reset: (requestID: String, accountID: String)? = nil
 ) throws -> [Int: [String: Any]] {
     let process = Process()
     let input = Pipe()
@@ -206,6 +236,22 @@ private func runServer(
 
     try send(["method": "initialized", "params": [:]], to: input.fileHandleForWriting)
     try send(["method": "account/read", "id": 4, "params": ["refreshToken": false]], to: input.fileHandleForWriting)
+    if let reset {
+        try readResponses(
+            wantedIDs: [4], from: output.fileHandleForReading, buffer: &readBuffer, responses: &responses
+        )
+        guard codexAccountID(from: responses[4]) == reset.accountID else {
+            throw CodexAppServerError.server("The account in this folder changed. Refresh before using a reset.")
+        }
+        try send([
+            "method": "account/rateLimitResetCredit/consume", "id": 5,
+            "params": ["idempotencyKey": reset.requestID],
+        ], to: input.fileHandleForWriting)
+        try readResponses(
+            wantedIDs: [5], from: output.fileHandleForReading, buffer: &readBuffer, responses: &responses
+        )
+        return responses
+    }
     if readings != nil {
         // Identity is optional; a slow or older runtime must not delay quota until timeout.
         try? readResponses(
@@ -355,7 +401,10 @@ func parseCodexQuota(_ response: [String: Any]?) throws -> ProviderSnapshot {
         shortWindow: windows.count > 1 ? windows.first : nil,
         longWindow: windows.last,
         extraWindows: extraWindows,
-        error: nil
+        error: nil,
+        weeklyResetCredits: integer(dictionary(result["rateLimitResetCredits"])?["availableCount"])
+            .flatMap { $0 >= 0 ? $0 : nil },
+        resetCreditsFetched: true
     )
 }
 

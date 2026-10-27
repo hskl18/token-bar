@@ -17,6 +17,9 @@ struct CodexTranscriptParseResult {
 }
 
 struct CodexTranscriptParser {
+    /// The folder's login. Sessions another login created, such as copies merged in from its folder, are skipped.
+    var accountID: String? = nil
+
     func parse(
         _ line: Data,
         path: String,
@@ -34,6 +37,7 @@ struct CodexTranscriptParser {
         if type == "session_meta" {
             if cursor.sawSessionMeta != true {
                 cursor.sawSessionMeta = true
+                cursor.creatorAccountID = nonEmpty(payload?["creator_account_id"] as? String)
                 if let id = nonEmpty(payload?["id"] as? String) {
                     cursor.logicalSessionKey = Self.sessionKey(id)
                 }
@@ -58,6 +62,8 @@ struct CodexTranscriptParser {
         guard type == "event_msg", payload?["type"] as? String == "token_count" else {
             return .ignored
         }
+        // shortcut: a copied session continued under this login stays with its creator; split by turn if that happens.
+        if let creator = cursor.creatorAccountID, let accountID, creator != accountID { return .ignored }
 
         let info = payload?["info"] as? [String: Any]
         guard let totalRaw = info?["total_token_usage"] as? [String: Any],

@@ -99,10 +99,11 @@ private struct ProviderMark: View {
 
 struct RootView: View {
     @EnvironmentObject private var store: TokenBarStore
+    let onWeeklyReset: (ProviderScope, String, String) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
-            UnifiedUsagePage()
+            UnifiedUsagePage(onWeeklyReset: onWeeklyReset)
                 .padding(.horizontal, AppleGeometry.pageInset)
                 .padding(.top, 8)
                 .padding(.bottom, 4)
@@ -119,6 +120,7 @@ struct RootView: View {
 
 private struct UnifiedUsagePage: View {
     @EnvironmentObject private var store: TokenBarStore
+    let onWeeklyReset: (ProviderScope, String, String) -> Void
 
     private var presentation: ProviderPresentation {
         store.snapshot.presentation
@@ -144,7 +146,8 @@ private struct UnifiedUsagePage: View {
                 let provider = detail.map { title + " · " + $0 } ?? title
                 items.append(NamedWindow(
                     provider: provider, scope: name, source: source, window: window, barBase: color,
-                    status: nil
+                    status: nil,
+                    weeklyResetCredits: !quota.isStale && quota.resetCreditsFetched == true ? quota.weeklyResetCredits : nil
                 ))
             }
             if groupedWindows.isEmpty && showUnavailable {
@@ -206,8 +209,8 @@ private struct UnifiedUsagePage: View {
                     )
                 }
             } else if !windows.isEmpty {
-                ScrollView {
-                    PanelCard {
+                PanelCard(contentInset: 0) {
+                    ScrollView {
                         VStack(spacing: 12) {
                             ForEach(Array(windows.enumerated()), id: \.element.id) { index, item in
                                 WindowRow(
@@ -215,7 +218,12 @@ private struct UnifiedUsagePage: View {
                                     window: item.window,
                                     barBase: item.barBase,
                                     status: item.status,
-                                    source: item.source
+                                    source: item.source,
+                                    weeklyResetCredits: item.weeklyResetCredits,
+                                    resetEnabled: !store.isRefreshing && !store.isResettingQuota,
+                                    onReset: {
+                                        onWeeklyReset(item.scope == "Claude" ? .claude : .codex, item.source, item.provider)
+                                    }
                                 )
                                 if index < windows.count - 1 {
                                     Divider().opacity(0.55)
@@ -223,6 +231,11 @@ private struct UnifiedUsagePage: View {
                             }
                         }
                     }
+                    .contentMargins(AppleGeometry.contentInset, for: .scrollContent)
+                    .contentMargins(.vertical, AppleGeometry.contentInset, for: .scrollIndicators)
+                    .clipShape(RoundedRectangle(
+                        cornerRadius: AppleGeometry.groupFallbackRadius, style: .continuous
+                    ))
                 }
             }
         }
@@ -345,6 +358,9 @@ private struct WindowRow: View {
     let barBase: NSColor
     let status: String?
     let source: String
+    let weeklyResetCredits: Int?
+    let resetEnabled: Bool
+    let onReset: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -370,10 +386,27 @@ private struct WindowRow: View {
             }
             .frame(height: 7)
 
-            Text(status ?? resetText(window?.resetsAt))
+            HStack {
+                Text(status ?? resetText(window?.resetsAt))
+                    .lineLimit(2)
+                Spacer(minLength: 8)
+                if let weeklyResetCredits, weeklyResetCredits > 0,
+                   window?.windowMinutes == 7 * 24 * 60,
+                   window?.limitID == nil || ["claude", "codex"].contains(window?.limitID ?? "") {
+                    Button(action: onReset) {
+                        Text("Reset \(weeklyResetCredits)")
+                            .monospacedDigit()
+                            .fixedSize()
+                            .padding(.horizontal, 6)
+                            .background(Palette.secondary.opacity(0.12), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!resetEnabled)
+                    .help("Use one of this account's \(weeklyResetCredits) weekly reset credits, after confirmation.")
+                }
+            }
             .font(.system(size: TokenBarType.secondary, weight: .medium))
             .foregroundStyle(Palette.secondary)
-            .lineLimit(2)
         }
         .help("\(name). Source: \(source). " + (status ?? "Percentage used for this account and window."))
     }
@@ -605,11 +638,12 @@ private struct FooterBar: View {
 }
 
 private struct PanelCard<Content: View>: View {
+    var contentInset: CGFloat = AppleGeometry.contentInset
     @ViewBuilder let content: Content
 
     var body: some View {
         content
-            .padding(AppleGeometry.contentInset)
+            .padding(contentInset)
             .frame(maxWidth: .infinity, alignment: .leading)
             .appleConcentricSurface(
                 fill: Palette.surface.opacity(0.76),
@@ -699,6 +733,7 @@ private struct NamedWindow: Identifiable {
     let window: LimitWindow?
     let barBase: NSColor
     let status: String?
+    var weeklyResetCredits: Int? = nil
 
     var id: String { scope + source + (window?.id ?? "unavailable") }
 }

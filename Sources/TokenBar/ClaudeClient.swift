@@ -12,6 +12,11 @@ struct ClaudeAccountProfile: Hashable, Sendable {
         accountID(in: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude.json"))
     }
 
+    static func currentAccountID(for profile: ClaudeAccountProfile?) -> String? {
+        guard let profile else { return primaryAccountID }
+        return accountID(in: profile.configDirectory.appendingPathComponent(".claude.json"))
+    }
+
     static func discover(in directories: [URL], primaryID: String?) -> [ClaudeAccountProfile] {
         let titles = AccountSource.titles(for: [AccountSource.primaryDirectory(for: .claude)] + directories)
         var seen = Set<String>()
@@ -79,10 +84,78 @@ enum ClaudeClientError: LocalizedError {
 }
 
 struct ClaudeClient {
+    private static let cliVersion = Task.detached(priority: .utility) { () -> String? in
+        guard let executable = claudeExecutable() else { return nil }
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = executable
+        process.arguments = ["--version"]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return nil }
+        defer { stopClaudeProcess(process) }
+        let deadline = Date().addingTimeInterval(2)
+        while process.isRunning, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        guard !process.isRunning, process.terminationStatus == 0,
+              let text = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8),
+              let version = text.split(whereSeparator: \.isWhitespace).first.map(String.init),
+              version.range(of: #"^\d+\.\d+\.\d+$"#, options: .regularExpression) != nil
+        else { return nil }
+        return version
+    }
+
     func fetch(profile: ClaudeAccountProfile? = nil) async throws -> ProviderSnapshot {
+        let accountID = ClaudeAccountProfile.currentAccountID(for: profile)
+        var snapshot = try parseSnapshot(data: try await fetchUsage(profile: profile).data)
+        if accountID == ClaudeAccountProfile.currentAccountID(for: profile) {
+            snapshot.resetAccountID = accountID
+        } else {
+            snapshot.weeklyResetCredits = nil
+        }
+        return snapshot
+    }
+
+    func consumeWeeklyReset(profile: ClaudeAccountProfile?, expectedAccountID: String) async throws {
+        func currentAccountID() -> String? {
+            ClaudeAccountProfile.currentAccountID(for: profile)
+        }
+        guard currentAccountID() == expectedAccountID,
+              let organization = expectedAccountID.split(separator: ":").last.map(String.init),
+              UUID(uuidString: organization) != nil else {
+            throw ClaudeClientError.requestFailed("The account in this folder changed. Refresh before using a reset.")
+        }
+        let usage = try await fetchUsage(profile: profile)
+        guard currentAccountID() == expectedAccountID else {
+            throw ClaudeClientError.requestFailed("The account changed while checking reset credits. Refresh and try again.")
+        }
+        let object = try JSONSerialization.jsonObject(with: usage.data) as? [String: Any]
+        guard let grantID = parseClaudeWeeklyResetCredits(object?["cedar_ember"])?.grantID else {
+            throw ClaudeClientError.requestFailed("This account has no available weekly reset credits.")
+        }
+        let response = try await request(
+            path: "/api/organizations/\(organization)/reset_rate_limits", token: usage.token,
+            body: ["program": "cedar_ember", "grant_id": grantID, "request_id": UUID().uuidString]
+        )
+        if response.http.statusCode == 429 {
+            throw ClaudeClientError.rateLimited(retryAfter: retryAfterInterval(from: response.http))
+        }
+        guard (200..<300).contains(response.http.statusCode) else {
+            throw ClaudeClientError.requestFailed("Claude reset request returned HTTP \(response.http.statusCode).")
+        }
+        let result = try JSONSerialization.jsonObject(with: response.data) as? [String: Any]
+        guard result?["result"] as? String == "reset" else {
+            throw ClaudeClientError.requestFailed("Claude did not reset this account (\(result?["result"] as? String ?? "unknown response")).")
+        }
+    }
+
+    private func fetchUsage(profile: ClaudeAccountProfile?) async throws -> (data: Data, token: String) {
         let initialToken = try await Task.detached(priority: .utility) {
             try readClaudeKeychainCredential(profile: profile)
         }.value
+        var currentToken = initialToken
         var response = try await requestUsage(token: initialToken)
 
         if response.http.statusCode == 401 || response.http.statusCode == 403 {
@@ -94,7 +167,10 @@ struct ClaudeClient {
                 token = await ClaudeCLIRecovery.shared.refresh(profile: profile, token: initialToken) ?? token
             }
             try Task.checkCancellation()
-            if token != initialToken { response = try await requestUsage(token: token) }
+            if token != initialToken {
+                currentToken = token
+                response = try await requestUsage(token: token)
+            }
         }
 
         if response.http.statusCode == 401 {
@@ -114,18 +190,39 @@ struct ClaudeClient {
             )
         }
 
-        return try parseSnapshot(data: response.data)
+        return (response.data, currentToken)
     }
 
-    private func requestUsage(token: String) async throws -> (data: Data, http: HTTPURLResponse) {
-        var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
-        request.httpMethod = "GET"
+    private func requestUsage(token: String, includeResetCredits: Bool = true) async throws -> (data: Data, http: HTTPURLResponse) {
+        let query = includeResetCredits ? "?cedar_ember=1" : ""
+        let response = try await request(path: "/api/oauth/usage" + query, token: token)
+        if includeResetCredits, [400, 404, 422].contains(response.http.statusCode) {
+            return try await requestUsage(token: token, includeResetCredits: false)
+        }
+        return response
+    }
+
+    private func request(path: String, token: String, body: [String: String]? = nil) async throws -> (data: Data, http: HTTPURLResponse) {
+        var request = URLRequest(url: URL(string: "https://api.anthropic.com" + path)!)
+        request.httpMethod = body == nil ? "GET" : "POST"
+        if let body {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
         request.timeoutInterval = 10
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        request.setValue("claude-code/1.0.0", forHTTPHeaderField: "User-Agent")
+        // Reset grants depend on the CLI surface and version, unlike ordinary quota windows.
+        request.setValue("cli", forHTTPHeaderField: "x-app")
+        request.setValue("claude_code_cli", forHTTPHeaderField: "anthropic-client-platform")
+        if let version = await Self.cliVersion.value {
+            request.setValue("claude-cli/\(version) (external, cli)", forHTTPHeaderField: "User-Agent")
+            request.setValue(version, forHTTPHeaderField: "anthropic-client-version")
+        } else {
+            request.setValue("TokenBar", forHTTPHeaderField: "User-Agent")
+        }
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.urlCache = nil
@@ -216,9 +313,39 @@ struct ClaudeClient {
             shortWindow: windows.first { $0.limitID == "claude" && $0.windowMinutes == 5 * 60 },
             longWindow: windows.first { $0.limitID == "claude" && $0.windowMinutes == 7 * 24 * 60 },
             extraWindows: windows.filter { $0.limitID != "claude" },
-            error: nil
+            error: nil,
+            weeklyResetCredits: parseClaudeWeeklyResetCredits(root["cedar_ember"])?.count,
+            resetCreditsFetched: true
         )
     }
+}
+
+private func parseClaudeWeeklyResetCredits(_ raw: Any?, at now: Date = Date()) -> (count: Int, grantID: String?)? {
+    guard let block = raw as? [String: Any], let eligible = block["eligible"] as? Bool else { return nil }
+    guard eligible else { return block["ineligible_reason"] as? String == "no_grant" ? (0, nil) : nil }
+    guard let grants = block["grants"] as? [[String: Any]] else { return nil }
+    var count = 0
+    var grantID: String?
+    for grant in grants {
+        guard let left = grant["resets_left"] as? Int, left >= 0,
+              let clears = grant["clears"] as? [String] else { return nil }
+        guard clears.contains("seven_day"), left > 0, grant["paused"] as? Bool != true,
+              grant["gives_back_weekly"] as? Bool != true else { continue }
+        if let rawStart = grant["starts_at"] as? String {
+            guard let start = parseISO8601(rawStart) else { return nil }
+            if start > now { continue }
+        }
+        if let rawEnd = grant["ends_at"] as? String {
+            guard let end = parseISO8601(rawEnd) else { return nil }
+            if end <= now { continue }
+        }
+        guard let id = grant["id"] as? String, !id.isEmpty else { return nil }
+        let sum = count.addingReportingOverflow(left)
+        guard !sum.overflow else { return nil }
+        count = sum.partialValue
+        grantID = grantID ?? id
+    }
+    return (count, grantID)
 }
 
 private actor ClaudeCLIRecovery {
