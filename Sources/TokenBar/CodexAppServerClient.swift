@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import os
 
 struct CodexAccountProfile: Sendable {
     let id: String
@@ -109,15 +110,22 @@ struct CodexAppServerClient {
             throw CodexAppServerError.executableMissing
         }
 
-        return try await Task.detached(priority: .utility) {
+        // Cancel Refresh stops the child it is waiting on and the probes of later runtimes.
+        let child = OSAllocatedUnfairLock<Process?>(uncheckedState: nil)
+        let task = Task.detached(priority: .utility) {
             var lastError: Error = CodexAppServerError.invalidResponse
             for candidate in candidates {
+                try Task.checkCancellation()
                 do {
                     let responses = try runServer(
                         executableURL: candidate.executableURL,
                         codexHome: codexHome,
                         includeActivity: includeActivity,
-                        readings: readings
+                        readings: readings,
+                        started: { process in
+                            child.withLockUnchecked { $0 = process }
+                            if Task.isCancelled { process.terminate() }
+                        }
                     )
                     let result = CodexFetchResult(
                         quota: Result {
@@ -143,9 +151,16 @@ struct CodexAppServerClient {
                 }
             }
 
+            try Task.checkCancellation()
             UserDefaults.standard.removeObject(forKey: StorageKeys.codexRuntimeExecutable)
             throw lastError
-        }.value
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+            child.withLockUnchecked { $0?.terminate() }
+        }
     }
 }
 
@@ -165,7 +180,7 @@ private extension CodexFetchResult {
 
 private func runServer(
     executableURL: URL, codexHome: URL?, includeActivity: Bool, readings: CodexQuotaReadings?,
-    reset: (requestID: String, accountID: String)? = nil
+    reset: (requestID: String, accountID: String)? = nil, started: (Process) -> Void = { _ in }
 ) throws -> [Int: [String: Any]] {
     let process = Process()
     let input = Pipe()
@@ -195,6 +210,7 @@ private func runServer(
 
     do {
         try process.run()
+        started(process)
     } catch {
         throw CodexAppServerError.launchFailed(error.localizedDescription)
     }

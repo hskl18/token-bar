@@ -334,16 +334,13 @@ private struct UsageActivityGroup: View {
     private var staleHelp: String {
         switch provider {
         case .claude:
-            return store.snapshot.claude.error ?? "Showing the last successful Claude reading."
+            return store.staleError(.claude) ?? "Showing the last successful Claude reading."
         case .codex:
-            return store.snapshot.codex.error ?? "Showing the last successful Codex reading."
+            return store.staleError(.codex) ?? "Showing the last successful Codex reading."
         case .overview:
-            let staleProviders: [(name: String, error: String?)] = [
-                ("Claude", store.snapshot.claude.isStale ? store.snapshot.claude.error : nil),
-                ("Codex", store.snapshot.codex.isStale ? store.snapshot.codex.error : nil),
-            ].filter { name, _ in
-                name == "Claude" ? store.snapshot.claude.isStale : store.snapshot.codex.isStale
-            }
+            let staleProviders: [(name: String, error: String?)] = [ProviderScope.claude, .codex]
+                .filter { store.isStale($0) }
+                .map { ($0.title, store.staleError($0)) }
             let names = staleProviders.map(\.name).joined(separator: " and ")
             let details = staleProviders.compactMap(\.error).joined(separator: " ")
             let summary = "All includes stale \(names) data."

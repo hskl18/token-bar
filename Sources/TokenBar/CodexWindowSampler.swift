@@ -8,13 +8,20 @@ struct CodexWindowSampler {
     private let ledgerKey: String
     private let mixSampler: CodexMixSampler
 
-    init(defaults: UserDefaults = .standard, codexHome: URL? = nil, additionalHomes: [URL] = [], accountID: String? = nil) {
+    init(
+        defaults: UserDefaults = .standard, codexHome: URL? = nil, additionalHomes: [URL] = [], accountID: String? = nil,
+        weeklyResets: [String: Date] = [:]
+    ) {
         self.defaults = defaults
-        parser = CodexTranscriptParser(accountID: accountID)
         codexHomes = Array(Set([codexHome ?? AccountSource.primaryDirectory(for: .codex)] + additionalHomes))
             .sorted { $0.path < $1.path }
-        mixSampler = CodexMixSampler(codexHome: codexHome, additionalHomes: additionalHomes, accountID: accountID)
-        ledgerKey = StorageKeys.codexLedger(StorageKeys.codexWindowLedger, directories: codexHomes.map(\.path))
+        parser = CodexTranscriptParser(accountID: accountID, homes: codexHomes, weeklyResets: weeklyResets)
+        mixSampler = CodexMixSampler(
+            codexHome: codexHome, additionalHomes: additionalHomes, accountID: accountID, weeklyResets: weeklyResets
+        )
+        ledgerKey = StorageKeys.codexLedger(
+            StorageKeys.codexWindowLedger, directories: CodexMixSampler.ledgerFolders(for: codexHomes)
+        )
     }
 
     /// The result also counts threads whose rollout files are gone; the saved ledger keeps only rollout records.
@@ -130,9 +137,10 @@ struct CodexWindowSampler {
     }
 
     private func sessionFiles(since windowStartedAt: Date) -> [TranscriptFile] {
-        TranscriptFile.list(in: codexHomes.flatMap { home in
-            ["sessions", "archived_sessions"].map { home.appendingPathComponent($0) }
-        }, since: windowStartedAt)
+        // A linked `sessions` is read once, at its real path, so the parser can tell whose folder holds each file.
+        TranscriptFile.list(in: Set(codexHomes.flatMap { home in
+            ["sessions", "archived_sessions"].map { home.appendingPathComponent($0).resolvingSymlinksInPath().path }
+        }).map { URL(fileURLWithPath: $0, isDirectory: true) }, since: windowStartedAt)
     }
 
     private func consumeChunk(

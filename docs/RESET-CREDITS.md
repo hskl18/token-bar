@@ -53,31 +53,7 @@ Before sending a spend, Token Bar invalidates the saved reset-count freshness so
 Success and failure both schedule a refresh of the selected account, respecting existing rate-limit cooldowns.
 Reset credits were not consumed to verify this implementation.
 
-## Local verification
+## Verification limits
 
-All 21 existing tests passed after the final source changes.
-The release build completed and the Desktop bundle matches the build output in a recursive comparison.
-Strict signature verification passes after clearing the bundle's FinderInfo metadata, but that metadata reappears after launch in this environment, so the post-launch strict result is not stable.
-This metadata restriction is described in [Apple QA1940](https://developer.apple.com/library/archive/qa/qa1940/_index.html).
-The restarted app's saved snapshot confirmed fresh, identity-bound counts of 2 for Codex and Codex-cli and 0 for Claude and Claude-z.
-Claude-x did not return a confirmed count and remains hidden.
-The native UI tool timed out, so visual placement and the confirmation interaction were not manually verified.
-Actual redemption was not exercised.
-
-### Responsiveness follow-up, October 23
-
-The user reported severe scrolling and clicking lag after this build.
-The earlier build and data checks did not establish interactive performance.
-Quota rows now receive cached values and actions without subscribing individually to the whole store.
-The installed CLI version is resolved once in a shared utility task, and reset confirmation closes the menu before entering the alert's modal loop.
-All 21 existing tests and the release build passed after these changes.
-Passive samples before and after the changes captured idle event loops, not the reported scrolling failure.
-The native UI tool timed out again, so the cause and resolution of the scrolling lag remain unconfirmed.
-The user subsequently requested code inspection and background sampling only.
-The follow-up moves the quota card outside the scroll view and reuses activity totals across cards and tooltips for each snapshot and calendar period.
-Reset metadata now arrives through the normal quota refresh without forcing an extra startup refresh.
-The 21 existing tests still pass; no UI interaction or reset redemption was performed for this follow-up.
-A startup sample captured activity date parsing on the main thread during the initial card render.
-Parsed day dates now use a shared `NSCache`, separated by formatter time zone, while the UTC-noon and local-day assignment rules remain unchanged.
-Two separate 20-second startup samples recorded 107 and 11 main-thread `DateFormatter.dateFromString` samples before and after the day cache, respectively.
-The earlier sample already includes the summary cache and fixed quota background; this comparison does not measure scrolling frame rate or input latency.
+Actual redemption was not exercised, and the confirmation interaction was not tested through the UI.
+A strict signature check can fail after launch because Finder metadata reappears; see [Apple QA1940](https://developer.apple.com/library/archive/qa/qa1940/_index.html).

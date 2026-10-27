@@ -65,13 +65,16 @@ This covers absent dates, gaps between reported dates, and a present bucket that
 Reported and local totals are never added for the same day; the account total takes over when it catches up.
 Local totals remain provisional, can omit other devices, and retain the same UTC-day assignment as account buckets.
 Only dated transcript records supply this floor; lost-thread totals reconstructed from database update times affect the estimated price mix but cannot raise a daily account bucket.
-A Codex folder counts only sessions and lost threads whose `creator_account_id` is its own login or absent, so sessions copied in from another account's folder stay with that account.
+A Codex folder counts lost threads only when their `creator_account_id` is its own login or absent, so threads copied in from another account's folder stay with that account.
+Each token count in a session file records the serving login's `rate_limits`, so a count whose weekly reset matches a login's current weekly reset belongs to that login, even in a session another login created and this one resumed.
+A folder whose `sessions` links into another login's folder reads it once at its real path; a count whose weekly reset matches no current login goes to the session's creator, and a creator-less one to the folder that holds the file.
 Each saved Codex ledger records the login it counted and is rebuilt once when that login differs.
 Directories confirmed as the same account share a calendar ledger and current-window scan, using the existing message identities to deduplicate copied sessions.
 The newest successful activity response supplies the account buckets independently of quota-row freshness.
 When directories first join, retained disjoint history is reused and overlapping source files are replayed once.
 If missing source files prevent reconciliation of overlapping retained history, local totals are marked incomplete and the affected weekly projection is unavailable.
-A thread whose rollout file is gone joins Codex mixes and current-window samples from the folder's `state_5.sqlite` thread table.
+A thread whose rollout file is gone joins Codex mixes and current-window samples from the `state_5.sqlite` thread table in the folder, or in the folder its `config.toml` names with a top-level `sqlite_home`.
+A table shared that way counts only threads its own login created.
 While no connection holds that database's `-shm` file, a read-only open of the WAL database would fail, so Token Bar opens it as immutable.
 Its `tokens_used`, less the cumulative total the last scan of that session read, is split like the same model's local token categories.
 A spawned subagent thread lost before any scan is skipped, because its total starts with its parent's.

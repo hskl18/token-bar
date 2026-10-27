@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""One-time merge: move every ~/.claude-* account's session data into ~/.claude and link it back.
+
+Dry run by default. Quit every Claude Code session, then run with --apply.
+Nothing is deleted: duplicates and replaced versions go to ~/.claude-share-backup-<time>/.
+--apply needs the SessionStart hook from docs/SHARED-ACCOUNTS.md in every account's settings.json:
+the shared transcripts name no account, so Token Bar reads the account from ~/.claude/account-sessions.jsonl.
+Running it again is safe; an account that is already linked is skipped.
+"""
+import collections
+import filecmp
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+PRIMARY = f"{HOME}/.claude"
+# Signed-in ~/.claude-* folders, as Token Bar finds them; the backups this script makes hold no sign-in file.
+OTHERS = [f"{HOME}/{name}" for name in sorted(os.listdir(HOME))
+          if name.startswith(".claude-") and os.path.isdir(f"{HOME}/{name}") and not os.path.islink(f"{HOME}/{name}")
+          and any(os.path.isfile(f"{HOME}/{name}/{marker}") and not os.path.islink(f"{HOME}/{name}/{marker}")
+                  for marker in (".claude.json", ".credentials.json"))]
+# `sessions` stays per account: it lists live processes, not conversations.
+SHARED = ["projects", "file-history", "paste-cache", "session-env"]
+OWNERS = f"{PRIMARY}/account-sessions.jsonl"
+SESSION_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+LINK = re.compile(r"\]\(([^)]+)\)")
+
+apply = "--apply" in sys.argv
+backup = f"{HOME}/.claude-share-backup-{time.strftime('%Y%m%d-%H%M%S')}"
+stats = collections.Counter()
+replaced = []
+
+
+def running_sessions():
+    lines = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True).stdout.splitlines()
+    found = []
+    for line in lines:
+        pid, _, args = line.strip().partition(" ")
+        program = args.split(" ", 1)[0]
+        if (os.path.basename(program) == "claude" or "/.local/share/claude/versions/" in program) \
+                and "--chrome-native-host" not in args:
+            found.append(f"{pid} {args[:80]}")
+    return found
+
+
+def backup_path(account, rel):
+    """A backup path no earlier version took: one file can be displaced once per account."""
+    base = target = os.path.join(backup, os.path.basename(account), rel)
+    version = 1
+    while os.path.lexists(target):
+        target, version = f"{base}.{version}", version + 1
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    return target
+
+
+def stash(path, account, rel):
+    """Move a file or folder out of the way into the backup, keeping its place in the tree."""
+    stats["backed up"] += 1
+    if apply:
+        shutil.move(path, backup_path(account, rel))
+
+
+def save_original(path, rel):
+    if apply:
+        shutil.copy2(path, backup_path(PRIMARY, rel))
+
+
+def read_lines(path):
+    with open(path, encoding="utf-8", errors="surrogateescape") as file:
+        return file.read().splitlines()
+
+
+def join_transcripts(src, dst, rel):
+    """Copies of one session diverge after a copy, so keep every line and add the missing ones at the end."""
+    have = set(read_lines(dst))
+    missing = [line for line in read_lines(src) if line not in have]
+    stats["transcripts joined"] += 1
+    if apply and missing:
+        save_original(dst, rel)
+        size = os.path.getsize(dst)
+        with open(dst, "rb") as file:
+            file.seek(max(0, size - 1))
+            needs_newline = size > 0 and file.read(1) != b"\n"
+        with open(dst, "a", encoding="utf-8", errors="surrogateescape") as file:
+            file.write(("\n" if needs_newline else "") + "\n".join(missing) + "\n")
+
+
+def join_index(src, dst, rel):
+    """MEMORY.md: keep the existing lines, then add lines for memory files the index does not link yet."""
+    lines = read_lines(dst)
+    linked = {match for line in lines for match in LINK.findall(line)}
+    extra = [line for line in read_lines(src)
+             if line.strip() and line not in lines and not set(LINK.findall(line)) & linked]
+    stats["memory indexes joined"] += 1
+    if apply and extra:
+        save_original(dst, rel)
+        with open(dst, "w", encoding="utf-8", errors="surrogateescape") as file:
+            file.write("\n".join(lines + extra) + "\n")
+
+
+def merge(src, dst, account, rel):
+    for name in sorted(os.listdir(src)):
+        s, d, r = os.path.join(src, name), os.path.join(dst, name), os.path.join(rel, name)
+        if not os.path.lexists(d):
+            stats["moved"] += 1
+            if apply:
+                os.rename(s, d)
+        elif os.path.isdir(s) and not os.path.islink(s) and os.path.isdir(d) and not os.path.islink(d):
+            merge(s, d, account, r)
+        elif os.path.isfile(s) and os.path.isfile(d):
+            if filecmp.cmp(s, d, shallow=False):
+                stats["identical"] += 1
+            elif name.endswith(".jsonl"):
+                join_transcripts(s, d, r)
+            elif name == "MEMORY.md":
+                join_index(s, d, r)
+            else:
+                newer = os.path.getmtime(s) > os.path.getmtime(d)
+                replaced.append(f"{r}: kept the {os.path.basename(account if newer else PRIMARY)} copy (newer)")
+                if newer:
+                    stash(d, PRIMARY, r)
+                    if apply:
+                        os.rename(s, d)
+                    continue
+            stash(s, account, r)
+        else:
+            replaced.append(f"{r}: file and folder clash, {os.path.basename(account)} copy set aside")
+            stash(s, account, r)
+
+
+def session_owners():
+    """Each session's newest copy decides its account, so Token Bar keeps the right account's usage.
+
+    shortcut: a session once copied between accounts counts wholly for its newest copy's account;
+    the hook's real start times take over from here, so only those old copies are approximate.
+    """
+    newest = {}
+    for account in [PRIMARY] + OTHERS:
+        projects = os.path.join(account, "projects")
+        if os.path.islink(projects) or not os.path.isdir(projects):
+            continue
+        for project in os.listdir(projects):
+            folder = os.path.join(projects, project)
+            if not os.path.isdir(folder):
+                continue
+            for name in os.listdir(folder):
+                session = name.removesuffix(".jsonl")
+                if SESSION_ID.match(session):
+                    mtime = os.path.getmtime(os.path.join(folder, name))
+                    if mtime > newest.get(session, (0, ""))[0]:
+                        newest[session] = (mtime, account)
+    return {session: account for session, (_, account) in newest.items() if account != PRIMARY}
+
+
+def missing_hooks():
+    """Accounts whose settings.json runs no SessionStart command writing account-sessions.jsonl."""
+    missing = []
+    for account in [PRIMARY] + OTHERS:
+        try:
+            with open(os.path.join(account, "settings.json"), encoding="utf-8") as file:
+                settings = json.load(file)
+            groups = [] if settings.get("disableAllHooks") is True else settings.get("hooks", {}).get("SessionStart", [])
+            # Resumed, cleared and forked sessions can start under another login too, so only a hook with no
+            # matcher counts: it runs for every start source.
+            commands = [hook.get("command") or "" for group in groups if group.get("matcher") in (None, "", "*")
+                        for hook in group.get("hooks", [])]
+        except (OSError, ValueError, AttributeError, TypeError):
+            commands = []
+        if not any("account-sessions.jsonl" in command for command in commands):
+            missing.append(account)
+    return missing
+
+
+def main():
+    if not OTHERS:
+        sys.exit("No signed-in ~/.claude-* account folder found; nothing to merge.")
+    running = running_sessions()
+    if apply and running:
+        sys.exit("Quit these Claude Code sessions first:\n  " + "\n  ".join(running))
+    unhooked = missing_hooks()
+    if apply and unhooked:
+        sys.exit("Add the SessionStart hook from docs/SHARED-ACCOUNTS.md to settings.json in:\n  " + "\n  ".join(unhooked))
+
+    # Owners go first, so Token Bar never sees a moved file without knowing its account.
+    owners = session_owners()
+    if apply:
+        with open(OWNERS, "a", encoding="utf-8") as file:
+            for session, account in sorted(owners.items()):
+                file.write(json.dumps({"sessionId": session, "configDir": account, "at": "1970-01-01T00:00:00Z"}) + "\n")
+
+    for account in OTHERS:
+        for name in SHARED:
+            src, dst = os.path.join(account, name), os.path.join(PRIMARY, name)
+            if os.path.islink(src):
+                print(f"{src} is already a link")
+                continue
+            if apply:
+                os.makedirs(dst, exist_ok=True)
+            if os.path.isdir(src):
+                merge(src, dst, account, name)
+                if apply:
+                    leftovers = [f for _, _, files in os.walk(src) for f in files]
+                    if leftovers:
+                        sys.exit(f"{src} still holds {len(leftovers)} files; stopped before linking it")
+                    shutil.move(src, os.path.join(backup, os.path.basename(account), name + "-empty-folders"))
+            if apply:
+                os.symlink(dst, src)
+
+    print(("Applied." if apply else "Dry run, nothing changed.") + f" Sessions owned by other accounts: {len(owners)}")
+    for key, count in sorted(stats.items()):
+        print(f"  {key}: {count}")
+    for line in replaced:
+        print(f"  {line}")
+    if apply:
+        print(f"Backup: {backup}")
+    else:
+        if unhooked:
+            print("Before --apply, add the SessionStart hook to settings.json in:\n  " + "\n  ".join(unhooked))
+        if running:
+            print(f"Before --apply, quit these {len(running)} Claude Code sessions:\n  " + "\n  ".join(running))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""Start Claude Code (`cl`) or Codex (`cdx`) on the login with the most quota left.
+
+The logins are ~/.claude and every signed-in ~/.claude-* folder, and ~/.codex and every signed-in ~/.codex-*
+folder, found the way Token Bar finds them. Each login's quota is read live; a login that cannot be read
+uses the newer of its last live reading and Token Bar's. Once claude-share-projects and codex-share-home
+share the history, `cl --continue` or `cdx resume --last` picks up on whichever login has room.
+"""
+import hashlib
+import json
+import os
+import plistlib
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import threading
+import time
+import tomllib
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+
+HOME = os.path.expanduser("~")
+CLAUDE, CODEX = shutil.which("claude"), shutil.which("codex")
+# Arguments every `cdx` run passes before yours, such as ["-c", 'model="<model>"'].
+CODEX_ARGS = []
+APPLE_EPOCH = 978307200  # Token Bar saves dates as seconds since 2001-01-01.
+# Each login's last live reading, for when a login cannot be read live.
+CACHE = f"{HOME}/.cache/cl/quota.json"
+UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def logins(primary, prefix, markers):
+    """The primary folder, then each top-level ~/<prefix>* folder holding a sign-in file (AccountSource.detected)."""
+    found = [primary]
+    for name in sorted(os.listdir(HOME)):
+        folder = os.path.join(HOME, name)
+        if (name.startswith(prefix) and os.path.isdir(folder) and not os.path.islink(folder)
+                and any(os.path.isfile(f"{folder}/{marker}") and not os.path.islink(f"{folder}/{marker}")
+                        for marker in markers)):
+            found.append(folder)
+    return found
+
+
+def codex_model(home, args):
+    """The model Codex will run: the last -m or --model, else the last -c model=, else the config's.
+
+    shortcut: ignores --profile and the --model=<name> spelling; such runs are judged by the config's model.
+    """
+    picked = override = None
+    for flag, value in zip(args, args[1:]):
+        if flag in ("-m", "--model"):
+            picked = value
+        elif flag in ("-c", "--config") and value.partition("=")[0].strip() == "model":
+            override = value.partition("=")[2].strip().strip("\"'")
+    if picked or override:
+        return picked or override
+    try:
+        with open(f"{home}/config.toml", "rb") as file:
+            return tomllib.load(file).get("model")
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+
+
+def claude_usage(home):
+    """Claude's own reading for the login, or None without a current login token."""
+    service = "Claude Code-credentials"
+    if home != f"{HOME}/.claude":
+        service += "-" + hashlib.sha256(home.encode()).hexdigest()[:8]
+    try:
+        found = subprocess.run(
+            ["security", "find-generic-password", "-a", os.environ["USER"], "-s", service, "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+        # 44 is errSecItemNotFound: signed out, so only a last resort, like a full login.
+        # Any other failure, such as a locked Keychain, stays unknown.
+        if found.returncode == 44:
+            return False, [(100, None)]
+        oauth = json.loads(found.stdout)["claudeAiOauth"]
+        if oauth["expiresAt"] / 1000 < time.time() + 60:
+            return None  # Only Claude Code may refresh it; a refresh here would rotate its login away.
+        request = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
+            "Authorization": "Bearer " + oauth["accessToken"], "anthropic-beta": "oauth-2025-04-20",
+        })
+        usage = json.load(urllib.request.urlopen(request, timeout=3))
+    except Exception:
+        return None
+    timed = [w for w in (usage.get("five_hour"), usage.get("seven_day")) if w]
+    # Credit-only plans, such as the Enterprise trial, have no time windows.
+    found = timed or [w for w in [usage.get("extra_usage")] if w]
+    return bool(timed), [(w.get("utilization") or 0, w.get("resets_at") and datetime.fromisoformat(w["resets_at"]).timestamp())
+                         for w in found]
+
+
+def codex_usage(home):
+    """Codex's own reading for the login, from its app-server, or None."""
+    if not CODEX:
+        return None
+    env = {key: value for key, value in os.environ.items() if key not in TOOLS["cdx"]["credentials"]}
+    env["CODEX_HOME"] = home
+
+    def call(server, message):
+        server.stdin.write(json.dumps(message) + "\n")
+        server.stdin.flush()
+        for line in server.stdout:
+            reply = json.loads(line)
+            if reply.get("id") == message["id"]:
+                return reply
+
+    try:
+        server = subprocess.Popen([CODEX, "app-server", "--stdio"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, env=env, cwd=home, text=True)
+    except OSError:
+        return None
+    timer = threading.Timer(5, server.kill)
+    timer.start()
+    try:
+        call(server, {"method": "initialize", "id": 1, "params": {"clientInfo": {"name": "cdx", "title": "cdx", "version": "1"}}})
+        server.stdin.write(json.dumps({"method": "initialized", "params": {}}) + "\n")
+        reply = call(server, {"method": "account/rateLimits/read", "id": 2, "params": {"excludeResetCreditDetails": True}})
+        if "authentication" in str((reply or {}).get("error", {}).get("message", "")):
+            return False, [(100, None)]  # Signed out: only a last resort, like a full login.
+        result = reply["result"]
+        limits = (result.get("rateLimitsByLimitId") or {}).get("codex") or result["rateLimits"]
+    except Exception:
+        return None
+    finally:
+        timer.cancel()
+        server.kill()
+        server.wait()
+    credits = limits.get("credits") or {}
+    banner = result.get("rateLimitUpsell") or {}
+    # Codex's own tests for a usable login (tui backend_banners.rs): percentages alone cannot show a block.
+    # A block stays a full window with no reset, so a saved reading never expires into a free one.
+    blocked = (result.get("ordinaryUsageAllowed") is False and not (credits.get("unlimited") or credits.get("hasCredits"))
+               or limits.get("spendControlReached") is True or limits.get("rateLimitReachedType") is not None)
+    windows = [w for w in (limits.get("primary"), limits.get("secondary")) if w]
+    found = [(w.get("usedPercent") or 0, w.get("resetsAt")) for w in windows] + ([(100, None)] if blocked else [])
+    # A limit on the model this run uses blocks the login until the banner's reset.
+    model = codex_model(home, CODEX_ARGS + sys.argv[1:])
+    if (model and model in (banner.get("blocked_model_slug"), banner.get("model_slug"))
+            and banner.get("banner_type") == "selected_model_limit"):
+        found.append((100, banner.get("reset_at")))
+    return bool(windows), found
+
+
+def session_by_name(args, homes):
+    """`cdx resume <name>` or `fork <name>` with that session's ID, once the Codex logins share one history.
+
+    Codex looks a name up only among sessions whose files sit under the running login's own folder,
+    which misses every session the other login started.
+    shortcut: matches session names only, not Codex's fallback to a first message, and only right after the
+    subcommand; pass the session ID for anything else.
+    """
+    if (len(args) < 2 or args[0] not in ("resume", "fork") or args[1].startswith("-") or UUID.match(args[1])
+            or not any(os.path.islink(f"{home}/sessions") for home in homes[1:])):
+        return args
+    try:
+        db = sqlite3.connect(f"file:{HOME}/.codex/state_5.sqlite?mode=ro", uri=True)
+        ids = [row[0] for row in db.execute("SELECT id FROM threads WHERE trim(name) = ? AND archived = 0", (args[1],))]
+        db.close()
+    except sqlite3.Error:
+        return args
+    if len(ids) > 1:
+        sys.exit(f"cdx: Multiple sessions match '{args[1]}' (including {ids[0]} and {ids[1]}); use a session UUID.")
+    return [args[0], ids[0], *args[2:]] if ids else args
+
+
+TOOLS = {
+    "cl": {
+        "homes": logins(f"{HOME}/.claude", ".claude-", [".claude.json", ".credentials.json"]),
+        "variable": "CLAUDE_CONFIG_DIR",
+        # Naming ~/.claude would make Claude Code read another Keychain entry, so it stays unset.
+        "unnamed": f"{HOME}/.claude",
+        "program": [CLAUDE],
+        # Inherited credentials would override the picked login.
+        "credentials": ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+        "snapshot": ("claude", "additionalClaudeAccounts"),
+        "live": claude_usage,
+    },
+    "cdx": {
+        "homes": logins(f"{HOME}/.codex", ".codex-", ["auth.json", "config.toml"]),
+        "variable": "CODEX_HOME",
+        "unnamed": None,
+        "program": [CODEX, *CODEX_ARGS],
+        "credentials": ("CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_SQLITE_HOME"),
+        "snapshot": ("codex", "additionalCodexAccounts"),
+        "live": codex_usage,
+    },
+}
+
+
+def saved_readings(tool):
+    """The newest saved reading per login, from this launcher's cache or Token Bar: {home: (time, reading)}."""
+    try:
+        with open(CACHE) as file:
+            saved = {home: (entry["at"], (entry["timed"], [tuple(w) for w in entry["windows"]]))
+                     for home, entry in json.load(file).items()}
+    except (OSError, ValueError, KeyError, TypeError):
+        saved = {}
+    primary, others = tool["snapshot"]
+    try:
+        export = subprocess.run(["defaults", "export", "com.local.tokenbar", "-"],
+                                capture_output=True, timeout=5).stdout
+        snapshot = json.loads(plistlib.loads(export)["tokenbar.snapshot.v1"])
+    except Exception:
+        return saved
+    quotas = [(tool["homes"][0], snapshot.get(primary))]
+    quotas += [(account.get("sourceDirectory"), account.get("quota")) for account in snapshot.get(others) or []]
+    for home, quota in quotas:
+        at = quota and quota.get("lastSuccessAt")
+        if at is not None and at + APPLE_EPOCH > saved.get(home, (0,))[0]:
+            saved[home] = (at + APPLE_EPOCH, token_bar_windows(quota))
+    return saved
+
+
+def save_readings(readings, now):
+    """Remember live readings; another launcher writing at once only costs one reading."""
+    try:
+        with open(CACHE) as file:
+            cache = json.load(file)
+    except (OSError, ValueError):
+        cache = {}
+    cache.update({home: {"at": now, "timed": timed, "windows": windows} for home, (timed, windows) in readings.items()})
+    try:
+        os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+        with open(CACHE + f".{os.getpid()}", "w") as file:
+            json.dump(cache, file)
+        os.replace(CACHE + f".{os.getpid()}", CACHE)
+    except OSError:
+        pass  # The cache only helps a later launch; never block this one.
+
+
+def token_bar_windows(quota):
+    timed = [w for w in (quota.get("shortWindow"), quota.get("longWindow")) if w]
+    found = timed or [w for w in quota.get("extraWindows") or [] if w.get("limitID") == "claude:extra_usage"]
+    return bool(timed), [(w.get("usedPercent") or 0, None if w.get("resetsAt") is None else w["resetsAt"] + APPLE_EPOCH)
+                         for w in found]
+
+
+def room(windows, now):
+    """Percent left in the tightest window that has not reset yet."""
+    return min((100 - used for used, reset in windows if reset is None or reset > now), default=100)
+
+
+def wait(windows, now):
+    """Seconds until every full window resets: infinite when a reset time is unknown."""
+    return max((float("inf") if reset is None else max(0, reset - now)
+                for used, reset in windows if used >= 100), default=0)
+
+
+def pick(homes, readings, now):
+    """Most room among time-window logins, then credit-only or unread ones, else the one that frees up first."""
+    for timed in (True, False):
+        usable = [h for h in homes if readings[h][0] == timed and room(readings[h][1], now) > 0]
+        if usable:
+            return max(usable, key=lambda h: room(readings[h][1], now))
+    return min(homes, key=lambda h: wait(readings[h][1], now))
+
+
+def main():
+    command = os.path.basename(sys.argv[0])
+    tool = TOOLS[command]
+    if not tool["program"][0]:
+        sys.exit(f"{command}: {'claude' if command == 'cl' else 'codex'} is not on PATH")
+    homes, now = tool["homes"], time.time()
+    with ThreadPoolExecutor(len(homes)) as pool:
+        live = dict(zip(homes, pool.map(tool["live"], homes)))
+    readings = {home: reading for home, reading in live.items() if reading}
+    save_readings(readings, now)
+    if len(readings) < len(homes):
+        saved = saved_readings(tool)
+        # A login with no reading at all ranks with the credit-only ones.
+        readings = {home: readings.get(home) or saved.get(home, (0, (False, [])))[1] for home in homes}
+    home = pick(homes, readings, now)
+    name = os.path.basename(home).lstrip(".").capitalize()
+    left = room(readings[home][1], now)
+    if left > 0:
+        print(f"{command}: {name} ({left:.0f}% left)", file=sys.stderr)
+    else:
+        frees = wait(readings[home][1], now)
+        when = "at an unknown time" if frees == float("inf") else time.strftime("at %H:%M", time.localtime(now + frees))
+        print(f"{command}: every login is at a limit; {name} frees up first, {when}", file=sys.stderr)
+
+    env = {key: value for key, value in os.environ.items() if key not in tool["credentials"] and key != tool["variable"]}
+    if home != tool["unnamed"]:
+        env[tool["variable"]] = home
+    args = session_by_name(sys.argv[1:], homes) if command == "cdx" else sys.argv[1:]
+    os.execve(tool["program"][0], [*tool["program"], *args], env)
+
+
+if __name__ == "__main__":
+    main()

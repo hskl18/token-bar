@@ -1,0 +1,409 @@
+#!/usr/bin/env python3
+"""One-time merge: give a ~/.codex-* login the same Codex history as ~/.codex, then share it.
+
+Usage: codex-share-home [~/.codex-<name>] [--apply]; the folder may be left out when only one is signed in.
+Dry run by default. --apply stops that login's idle app-server daemon and refuses while any other Codex
+process runs on it. Nothing is deleted: replaced files go to ~/.codex/backups/<name>-share-<time>.
+
+Afterwards both logins' config.toml set sqlite_home to ~/.codex, so they open the same databases,
+and the other login links its sessions, prompt history, session names and thread locks to ~/.codex.
+auth.json, the daemon, plugins, caches and the memories folder stay per login: Codex refuses a linked
+memories folder and a linked .tmp, and each login's memory consolidation catches up from the shared database.
+Running it again is safe; it repairs a link Codex replaced with a file.
+"""
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import tomllib
+
+HOME = os.path.expanduser("~")
+PRIMARY = f"{HOME}/.codex"
+# Signed-in ~/.codex-* folders, as Token Bar finds them.
+LOGINS = [f"{HOME}/{name}" for name in sorted(os.listdir(HOME))
+          if name.startswith(".codex-") and os.path.isdir(f"{HOME}/{name}") and not os.path.islink(f"{HOME}/{name}")
+          and any(os.path.isfile(f"{HOME}/{name}/{marker}") and not os.path.islink(f"{HOME}/{name}/{marker}")
+                  for marker in ("auth.json", "config.toml"))]
+named = [os.path.abspath(os.path.expanduser(arg)) for arg in sys.argv[1:] if arg != "--apply"]
+if len(named) > 1 or (named and named[0] not in LOGINS) or (not named and len(LOGINS) != 1):
+    sys.exit("Name one signed-in Codex folder to share ~/.codex's history with: "
+             + (", ".join("~/" + os.path.basename(login) for login in LOGINS) or "none found"))
+OTHER = (named or LOGINS)[0]
+SHOWN = "~/" + os.path.basename(OTHER)
+CODEX = shutil.which("codex")
+if not CODEX:
+    sys.exit("codex is not on PATH")
+LINKED = ["sessions", "archived_sessions", "thread-writer-locks", "history.jsonl", "session_index.jsonl"]
+# Rollout compression and migration exclude each other with this lock, so both logins must take the same one.
+MAINTENANCE_LOCK = ".tmp/rollout-maintenance.lock"
+DATABASES = ["state_5", "thread_history_1", "goals_1", "memories_1", "memories_v2_1", "queue_1", "logs_2"]
+# Rows that belong to one thread: (database, table, thread id column).
+THREAD_ROWS = [
+    ("main", "threads", "id"),
+    ("main", "thread_spawn_edges", "child_thread_id"),
+    ("main", "thread_read_receipts", "thread_id"),
+    ("main", "thread_dynamic_tools", "thread_id"),
+    ("main", "thread_attachments", "thread_id"),
+    ("history", "thread_turns", "thread_id"),
+    ("history", "thread_items", "thread_id"),
+    ("history", "thread_history_projection_state", "thread_id"),
+    ("history", "thread_realtime_items", "thread_id"),
+    ("goals", "thread_goals", "thread_id"),
+    ("goals", "thread_goal_continuation_deferrals", "thread_id"),
+]
+
+apply = "--apply" in sys.argv
+backup = None  # set on --apply
+
+
+def codex_processes():
+    """Codex processes on the other login: (pid, is the managed daemon, command)."""
+    # -E appends each process's environment, which holds CODEX_HOME.
+    listing = subprocess.run(["ps", "-axEww", "-o", "pid=,command="], capture_output=True, text=True).stdout
+    found = []
+    for line in listing.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if os.path.basename(command.split(" ", 1)[0]) != "codex":
+            continue
+        # A value runs to the next ` NAME=`, so a folder name with spaces stays whole.
+        home = re.search(r"(?:^| )CODEX_HOME=(.*?)(?= [A-Za-z_][A-Za-z0-9_]*=|$)", command)
+        if os.path.realpath(home.group(1) if home else PRIMARY) == os.path.realpath(OTHER):
+            # `daemon stop` leaves the package updater running: it only installs releases and never opens session data.
+            if "daemon pid-update-loop" in command:
+                continue
+            daemon = "--managed-daemon" in command
+            found.append((int(pid), daemon, command.split(" CODEX_HOME=")[0][:120]))
+    return found
+
+
+def stop_daemon():
+    env = {key: value for key, value in os.environ.items() if key != "CODEX_SQLITE_HOME"}
+    env["CODEX_HOME"] = OTHER
+    subprocess.run([CODEX, "app-server", "daemon", "stop"], env=env, capture_output=True, timeout=60)
+    for _ in range(20):
+        if not any(daemon for _, daemon, _ in codex_processes()):
+            return
+        time.sleep(0.5)
+
+
+def session_files(home):
+    """Every file in a login's own session folders, by path relative to the login; a linked folder is skipped."""
+    found = {}
+    for folder in ("sessions", "archived_sessions"):
+        root = os.path.join(home, folder)
+        if os.path.islink(root):
+            continue
+        for directory, _, names in os.walk(root):
+            for name in names:
+                path = os.path.join(directory, name)
+                found[os.path.relpath(path, home)] = path
+    return found
+
+
+def digest(path):
+    result = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            result.update(block)
+    return result.hexdigest()
+
+
+MERGED = {"main": "state_5", "history": "thread_history_1", "goals": "goals_1", "memories": "memories_1"}
+
+
+def uri(path, writable):
+    if writable:
+        return path
+    # A read-only open of a WAL database fails while no -shm file exists, as after the daemon stops.
+    return f"file:{path}?" + ("mode=ro" if os.path.exists(path + "-shm") else "immutable=1")
+
+
+def connect():
+    """Both logins' databases; only --apply opens the primary ones for writing."""
+    missing = [f"{home}/{name}.sqlite" for home in (PRIMARY, OTHER) for name in MERGED.values()
+               if not os.path.isfile(f"{home}/{name}.sqlite")]
+    if missing:
+        sys.exit("Missing Codex databases; nothing was changed:\n  " + "\n  ".join(missing))
+
+    db = sqlite3.connect(uri(f"{PRIMARY}/state_5.sqlite", apply), timeout=30, isolation_level=None, uri=True)
+    db.execute("PRAGMA foreign_keys=ON")
+    for alias, name in MERGED.items():
+        if alias != "main":
+            db.execute("ATTACH DATABASE ? AS " + alias, (uri(f"{PRIMARY}/{name}.sqlite", apply),))
+        db.execute("ATTACH DATABASE ? AS cli_" + alias, (uri(f"{OTHER}/{name}.sqlite", False),))
+    return db
+
+
+def columns(db, alias, table):
+    return [row[1] for row in db.execute(f'PRAGMA {alias}.table_info("{table}")')]
+
+
+def plan_threads(db):
+    """Threads only the other login has, and threads both have where its copy is newer."""
+    new = [row[0] for row in db.execute("SELECT id FROM cli_main.threads WHERE id NOT IN (SELECT id FROM main.threads)")]
+    newer = db.execute(
+        "SELECT c.id, c.title FROM cli_main.threads c JOIN main.threads m USING(id)"
+        " WHERE coalesce(c.updated_at_ms, c.updated_at * 1000) > coalesce(m.updated_at_ms, m.updated_at * 1000)"
+    ).fetchall()
+    return new, newer
+
+
+def copy_rows(db, new):
+    """Insert each new thread's rows, then memory extractions the primary login lacks; a dry run only counts them."""
+    db.execute("CREATE TEMP TABLE new_threads(id TEXT PRIMARY KEY)")
+    db.executemany("INSERT INTO new_threads VALUES (?)", [(thread,) for thread in new])
+    counts = {}
+    prefix, target = OTHER + "/", PRIMARY + "/"
+    for alias, table, key in THREAD_ROWS:
+        wanted = columns(db, "cli_" + alias, table)
+        if wanted != columns(db, alias, table):
+            raise RuntimeError(f"{table} has different columns in the two logins; Codex versions differ")
+        names = ",".join(f'"{name}"' for name in wanted)
+        values = ",".join(
+            f"CASE WHEN substr(rollout_path, 1, {len(prefix)}) = ? THEN ? || substr(rollout_path, {len(prefix) + 1})"
+            " ELSE rollout_path END" if table == "threads" and name == "rollout_path" else f'"{name}"'
+            for name in wanted
+        )
+        parameters = (prefix, target) if table == "threads" else ()
+        rows = f'SELECT {values} FROM cli_{alias}."{table}" WHERE "{key}" IN (SELECT id FROM new_threads)'
+        counts[table] = (db.execute(f'INSERT INTO {alias}."{table}" ({names}) {rows}', parameters).rowcount if apply
+                         else db.execute(f"SELECT count(*) FROM ({rows})", parameters).fetchone()[0])
+    # Finished memory extractions the primary login lacks, so it never re-reads those threads or sees a stale lease.
+    db.execute(
+        "CREATE TEMP TABLE new_memories AS SELECT j.job_key AS id FROM cli_memories.jobs j"
+        " WHERE j.kind = 'memory_stage1' AND j.status = 'done'"
+        " AND j.job_key IN (SELECT thread_id FROM cli_memories.stage1_outputs)"
+        " AND j.job_key IN (SELECT id FROM main.threads UNION SELECT id FROM new_threads)"
+        " AND j.job_key NOT IN (SELECT job_key FROM memories.jobs WHERE kind = 'memory_stage1')"
+        " AND j.job_key NOT IN (SELECT thread_id FROM memories.stage1_outputs)")
+    for table, key, extra in (("stage1_outputs", "thread_id", ""), ("jobs", "job_key", " AND kind = 'memory_stage1'")):
+        wanted = columns(db, "cli_memories", table)
+        if wanted != columns(db, "memories", table):
+            raise RuntimeError(f"memories {table} has different columns in the two logins")
+        names = ",".join(f'"{name}"' for name in wanted)
+        rows = f'SELECT {names} FROM cli_memories."{table}" WHERE "{key}" IN (SELECT id FROM new_memories)' + extra
+        counts["memory " + table] = (db.execute(f'INSERT INTO memories."{table}" ({names}) {rows}').rowcount if apply
+                                     else db.execute(f"SELECT count(*) FROM ({rows})").fetchone()[0])
+    problems = db.execute("PRAGMA main.foreign_key_check").fetchall() if apply else []
+    if problems:
+        raise RuntimeError(f"foreign key problems after the copy: {problems[:3]}")
+    return counts
+
+
+def append_lines(name):
+    """Add the other login's lines to the primary file, skipping lines it already has. Returns the count."""
+    source, target = os.path.join(OTHER, name), os.path.join(PRIMARY, name)
+    if os.path.islink(source) or not os.path.isfile(source):
+        return 0
+
+    def key(line):
+        try:
+            return json.dumps(json.loads(line), sort_keys=True, ensure_ascii=False)
+        except ValueError:
+            return line.decode(errors="surrogateescape")
+
+    with open(source, "rb") as stream:
+        incoming = [line for line in stream.read().splitlines() if line.strip()]
+    if not apply and not os.path.exists(target):
+        return len({key(line) for line in incoming})  # --apply creates the file with these lines
+    with open(target, "a+b" if apply else "rb") as stream:
+        # Codex appends under the same advisory lock.
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        stream.seek(0)
+        existing = stream.read()
+        known = {key(line) for line in existing.splitlines()}
+        missing = []
+        for line in incoming:
+            if key(line) not in known:
+                known.add(key(line))
+                missing.append(line)
+        if apply and missing:
+            stream.write((b"\n" if existing and not existing.endswith(b"\n") else b"") + b"\n".join(missing) + b"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    return len(missing)
+
+
+def set_sqlite_home(path, home):
+    """Top-level `sqlite_home` in a login's config file, created if missing; False when already set."""
+    exists = os.path.exists(path)
+    text = ""
+    if exists:
+        with open(path, "rb") as stream:
+            text = stream.read().decode()
+    current = tomllib.loads(text).get("sqlite_home")
+    if current is not None:
+        if os.path.realpath(os.path.expanduser(current)) != os.path.realpath(PRIMARY):
+            raise RuntimeError(f"{path} already sets sqlite_home = {current!r}")
+        return False
+    lines = text.splitlines(keepends=True)
+    first_table = next((index for index, line in enumerate(lines) if line.lstrip().startswith("[")), len(lines))
+    lines[first_table:first_table] = [
+        f"# Codex logins ~/.codex and {SHOWN} share these databases; see codex-share-home.\n",
+        f"sqlite_home = {json.dumps(PRIMARY)}\n",
+        "\n",
+    ]
+    updated = "".join(lines)
+    if tomllib.loads(updated).get("sqlite_home") != PRIMARY:
+        raise RuntimeError(f"could not add sqlite_home to {path}")
+    if apply:
+        temporary = path + ".codex-share-home"
+        with open(temporary, "w") as stream:
+            stream.write(updated)
+        if exists:
+            # Named for the login, since each login's file is called config.toml.
+            shutil.copy2(path, os.path.join(backup, os.path.basename(home).lstrip(".") + "-config.toml"))
+            shutil.copymode(path, temporary)
+        else:
+            os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    return True
+
+
+def stash(path):
+    """Move a file of the other login into the backup."""
+    target = os.path.join(backup, os.path.basename(OTHER).lstrip("."), os.path.relpath(path, OTHER))
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    shutil.move(path, target)
+
+
+def link(relative):
+    """Point the other login's entry at the primary one. Returns what changed, or None."""
+    source, target = os.path.join(OTHER, relative), os.path.join(PRIMARY, relative)
+    if os.path.islink(source):
+        if os.path.realpath(source) != os.path.realpath(target):
+            raise RuntimeError(f"{source} links to {os.readlink(source)}, not {target}")
+        return None
+    if apply:
+        if not os.path.lexists(target):
+            if relative in ("sessions", "archived_sessions", "thread-writer-locks"):
+                os.makedirs(target, mode=0o700)
+            else:
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                open(target, "a").close()
+        if os.path.lexists(source):
+            stash(source)
+        os.makedirs(os.path.dirname(source), exist_ok=True)
+        os.symlink(target, source)
+    return f"linked {relative}"
+
+
+def main():
+    global backup
+    busy = codex_processes()
+    others = [process for process in busy if not process[1]]
+    if apply and others:
+        sys.exit(f"Quit these Codex sessions on {SHOWN} first, then run again:\n  "
+                 + "\n  ".join(f"{pid} {command}" for pid, _, command in others))
+    if apply and busy:
+        stop_daemon()
+        if codex_processes():
+            sys.exit(f"Codex is still running on {SHOWN}; run again in a moment.")
+
+    report = []
+    new = []
+    shared = os.path.islink(f"{OTHER}/sessions")
+    have_databases = os.path.isfile(f"{OTHER}/state_5.sqlite") and not shared
+    if shared and os.path.isfile(f"{OTHER}/state_5.sqlite"):
+        # Once shared, a Codex process that misses sqlite_home re-indexes the shared rollouts into this folder.
+        # Those files only repeat ~/.codex unless that process started a thread there, which is never set aside.
+        db = sqlite3.connect(uri(f"{PRIMARY}/state_5.sqlite", False), uri=True)
+        db.execute("ATTACH DATABASE ? AS other", (uri(f"{OTHER}/state_5.sqlite", False),))
+        unknown = db.execute("SELECT id FROM other.threads WHERE id NOT IN (SELECT id FROM main.threads)").fetchall()
+        db.close()
+        if unknown:
+            sys.exit(f"{SHOWN}/state_5.sqlite has threads ~/.codex lacks; nothing was changed:\n  "
+                     + "\n  ".join(thread for thread, in unknown[:20]))
+    if have_databases:
+        db = connect()
+        new, newer = plan_threads(db)
+        if newer:
+            sys.exit(f"These {SHOWN} threads have turns ~/.codex lacks; nothing was changed:\n  "
+                     + "\n  ".join(f"{thread} {title or ''}"[:120] for thread, title in newer))
+    if apply:
+        os.makedirs(f"{PRIMARY}/backups", exist_ok=True)
+        backup = tempfile.mkdtemp(prefix=os.path.basename(OTHER).lstrip(".") + time.strftime("-share-%Y%m%d-%H%M%S-"),
+                                  dir=f"{PRIMARY}/backups")
+
+    # Session files first, so no thread row ever points at a missing file. Every file the primary login lacks
+    # is copied, whatever Codex names it (reverted rollouts add `_<rollout id>`); compression adds `.zst`.
+    have = {os.path.basename(relative).removesuffix(".zst") for relative in session_files(PRIMARY)}
+    copied = 0
+    for relative, path in sorted(session_files(OTHER).items()):
+        if os.path.basename(relative).removesuffix(".zst") in have:
+            continue
+        target = os.path.join(PRIMARY, relative)
+        if os.path.lexists(target):
+            sys.exit(f"{target} already exists; nothing more was changed")
+        copied += 1
+        if apply:
+            os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
+            shutil.copy2(path, target)
+            if digest(path) != digest(target):
+                sys.exit(f"Copy mismatch: {target}")
+    report.append(f"session files copied: {copied}")
+
+    if have_databases:
+        if apply:
+            for name in ("state_5", "thread_history_1", "goals_1", "memories_1"):
+                source = sqlite3.connect(f"{PRIMARY}/{name}.sqlite", timeout=30)
+                copy = sqlite3.connect(os.path.join(backup, f"{name}.sqlite"))
+                source.backup(copy)
+                copy.close()
+                source.close()
+        if apply:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                counts = copy_rows(db, new)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+        else:
+            counts = copy_rows(db, new)
+        db.close()
+        report.append(f"threads added: {len(new)}")
+        report += [f"  {table}: {count}" for table, count in counts.items() if count]
+
+    for name in ("history.jsonl", "session_index.jsonl"):
+        report.append(f"{name} lines added: {append_lines(name)}")
+
+    configs = {}
+    for home in (PRIMARY, OTHER):
+        configs.setdefault(os.path.realpath(os.path.join(home, "config.toml")), home)
+    for path, home in sorted(configs.items()):
+        if set_sqlite_home(path, home):
+            report.append(f"set sqlite_home in {path}")
+
+    for relative in LINKED + [MAINTENANCE_LOCK]:
+        change = link(relative)
+        if change:
+            report.append(change)
+    moved = [f"{OTHER}/{name}.sqlite{suffix}" for name in DATABASES for suffix in ("", "-wal", "-shm")]
+    moved = [path for path in moved if os.path.lexists(path)]
+    if apply:
+        for path in moved:
+            stash(path)
+    if moved:
+        report.append(f"old {SHOWN} database files set aside: {len(moved)}")
+
+    print("Applied." if apply else "Dry run, nothing changed.")
+    for line in report:
+        print("  " + line)
+    if apply:
+        print(f"Backup: {backup}")
+    elif busy:
+        print(f"--apply will stop the {SHOWN} app-server daemon" if not others else
+              f"Before --apply, quit these Codex sessions on {SHOWN}:\n  "
+              + "\n  ".join(f"{pid} {command}" for pid, _, command in others))
+
+
+if __name__ == "__main__":
+    main()

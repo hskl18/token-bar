@@ -6,11 +6,12 @@ struct CodexMixSampler {
     private let codexHomes: [URL]
     private let ledgerKey: String
 
-    init(codexHome: URL? = nil, additionalHomes: [URL] = [], accountID: String? = nil) {
-        parser = CodexTranscriptParser(accountID: accountID)
+    /// `weeklyResets` holds each Codex login's current weekly reset by account ID, which settles who used a count.
+    init(codexHome: URL? = nil, additionalHomes: [URL] = [], accountID: String? = nil, weeklyResets: [String: Date] = [:]) {
         codexHomes = Array(Set([codexHome ?? AccountSource.primaryDirectory(for: .codex)] + additionalHomes))
             .sorted { $0.path < $1.path }
-        ledgerKey = StorageKeys.codexLedger(StorageKeys.codexUsageLedger, directories: codexHomes.map(\.path))
+        parser = CodexTranscriptParser(accountID: accountID, homes: codexHomes, weeklyResets: weeklyResets)
+        ledgerKey = StorageKeys.codexLedger(StorageKeys.codexUsageLedger, directories: Self.ledgerFolders(for: codexHomes))
     }
 
     /// The result also counts threads whose rollout files are gone; the saved ledger keeps only rollout records.
@@ -121,15 +122,25 @@ struct CodexMixSampler {
         return result
     }
 
+    /// Folder names for ledger keys. A login whose `sessions` links elsewhere names that folder too, so linking
+    /// starts its ledgers over instead of keeping totals counted under the old ownership rules.
+    static func ledgerFolders(for homes: [URL]) -> [String] {
+        homes.map { home in
+            let sessions = home.appendingPathComponent("sessions").resolvingSymlinksInPath().deletingLastPathComponent()
+            return sessions.path == home.resolvingSymlinksInPath().path ? home.path : "\(home.path) -> \(sessions.path)"
+        }
+    }
+
     /// The saved calendar mix, without lost threads.
     func savedMixLedger() -> MixLedger {
         loadLedger().mixLedger
     }
 
     private func sessionFiles(since cutoff: Date) -> [TranscriptFile] {
-        TranscriptFile.list(in: codexHomes.flatMap { home in
-            ["sessions", "archived_sessions"].map { home.appendingPathComponent($0) }
-        }, since: cutoff)
+        // A linked `sessions` is read once, at its real path, so the parser can tell whose folder holds each file.
+        TranscriptFile.list(in: Set(codexHomes.flatMap { home in
+            ["sessions", "archived_sessions"].map { home.appendingPathComponent($0).resolvingSymlinksInPath().path }
+        }).map { URL(fileURLWithPath: $0, isDirectory: true) }, since: cutoff)
     }
 
     private func consumeChunk(

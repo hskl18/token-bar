@@ -87,7 +87,9 @@ struct ClaudeMixSampler {
     }
 
     private func sessionFiles() -> [(URL, UInt64)] {
-        TranscriptFile.list(in: configDirectories.map { $0.appendingPathComponent("projects") }).map { ($0.url, $0.size) }
+        // A linked `projects` folder is read once, at its real path; the listing skips links themselves.
+        TranscriptFile.list(in: Set(configDirectories.map { $0.appendingPathComponent("projects").resolvingSymlinksInPath().path })
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }).map { ($0.url, $0.size) }
     }
 
     private func parseLines(
@@ -153,7 +155,8 @@ struct ClaudeMixSampler {
                 messageID: message["id"] as? String ?? root["uuid"] as? String,
                 requestID: root["requestId"] as? String ?? root["request_id"] as? String
             ),
-            byModel: byModel
+            byModel: byModel,
+            sessionID: root["sessionId"] as? String
         )
     }
 
@@ -216,6 +219,7 @@ struct ClaudeUsageRecord {
     var model: String
     var dedupeID: String?
     var byModel: [String: TokenBreakdown]
+    var sessionID: String?
 
     func accumulate(into models: inout [String: TokenBreakdown], previous: inout [String: TokenBreakdown]) {
         for (model, tokens) in byModel {

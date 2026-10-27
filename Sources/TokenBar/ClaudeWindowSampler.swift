@@ -4,10 +4,21 @@ struct ClaudeWindowSampler {
     private let readChunkBytes = 1024 * 1024
     private let lineParser = ClaudeMixSampler()
     private let configDirectory: URL
+    /// The real folder behind `projects`, which several accounts may link to and share.
+    private let projectsDirectory: URL
+    /// Who keeps a record no `SessionStart` line names: the account folder that holds `projects`,
+    /// or this account when its `projects` links somewhere no account owns, such as another disk.
+    private let fallbackOwner: String
     private let ledgerKey: String
 
     init(configDirectory: URL? = nil) {
         self.configDirectory = configDirectory ?? AccountSource.primaryDirectory(for: .claude)
+        projectsDirectory = self.configDirectory.appendingPathComponent("projects").resolvingSymlinksInPath()
+        let holder = projectsDirectory.deletingLastPathComponent().standardizedFileURL
+        let accounts = [AccountSource.primaryDirectory(for: .claude)]
+            + AccountSource.detected().filter { $0.provider == .claude }.map(\.url)
+        fallbackOwner = (accounts.contains { $0.resolvingSymlinksInPath().standardizedFileURL == holder }
+            ? holder : self.configDirectory.standardizedFileURL).path
         ledgerKey = configDirectory.map {
             StorageKeys.profileLedger(StorageKeys.claudeWindowLedger, directory: $0.path)
         } ?? StorageKeys.claudeWindowLedger
@@ -25,6 +36,7 @@ struct ClaudeWindowSampler {
         resetsAt: Date
     ) throws -> ClaudeWindowLedger {
         let files = sessionFiles(since: windowStartedAt)
+        let owners = ClaudeSessionOwners.load()
         let observedAt = Date()
         let activePaths = Set(files.map { $0.url.path })
         var ledger = loadLedger(
@@ -73,6 +85,7 @@ struct ClaudeWindowSampler {
                     data,
                     chunkOffset: chunkOffset,
                     path: path,
+                    owners: owners,
                     ledger: &ledger,
                     pending: &pending,
                     discardingLine: &discardingLine,
@@ -89,13 +102,20 @@ struct ClaudeWindowSampler {
     }
 
     private func sessionFiles(since windowStartedAt: Date) -> [TranscriptFile] {
-        TranscriptFile.list(in: [configDirectory.appendingPathComponent("projects")], since: windowStartedAt)
+        TranscriptFile.list(in: [projectsDirectory], since: windowStartedAt)
+    }
+
+    /// A record belongs to the account its session last started under, else to `fallbackOwner`.
+    private func belongs(_ record: ClaudeUsageRecord, owners: ClaudeSessionOwners) -> Bool {
+        let owner = owners.owner(of: record.sessionID, at: record.date) ?? fallbackOwner
+        return owner == configDirectory.standardizedFileURL.path
     }
 
     private func consumeChunk(
         _ data: Data,
         chunkOffset: UInt64,
         path: String,
+        owners: ClaudeSessionOwners,
         ledger: inout ClaudeWindowLedger,
         pending: inout Data,
         discardingLine: inout Bool,
@@ -107,7 +127,7 @@ struct ClaudeWindowSampler {
                 pending.append(contentsOf: data[segmentStart..<index])
             }
             if !discardingLine, !pending.isEmpty {
-                parseLine(pending, path: path, ledger: &ledger)
+                parseLine(pending, path: path, owners: owners, ledger: &ledger)
             }
             pending.removeAll(keepingCapacity: true)
             discardingLine = false
@@ -128,6 +148,7 @@ struct ClaudeWindowSampler {
     private func parseLine(
         _ line: Data,
         path: String,
+        owners: ClaudeSessionOwners,
         ledger: inout ClaudeWindowLedger
     ) {
         guard isRelevantPrefix(line.prefix(1024)) else { return }
@@ -142,7 +163,9 @@ struct ClaudeWindowSampler {
             } else { ledger.parseErrors += 1 }
             return
         }
-        guard record.date >= ledger.windowStartedAt, record.date <= ledger.observedAt else {
+        guard record.date >= ledger.windowStartedAt, record.date <= ledger.observedAt,
+              belongs(record, owners: owners)
+        else {
             return
         }
 

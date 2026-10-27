@@ -336,7 +336,9 @@ final class TokenBarStore: ObservableObject {
                 let (homes, accountID) = codexDirectories(for: directory)
                 let groupKey = homes.map(\.path).joined(separator: "\n")
                 guard scannedGroups.insert(groupKey).inserted else { continue }
-                let usage = await CodexMixSampler(codexHome: directory, additionalHomes: homes, accountID: accountID).update()
+                let usage = await CodexMixSampler(
+                    codexHome: directory, additionalHomes: homes, accountID: accountID, weeklyResets: codexWeeklyResets()
+                ).update()
                 var costLedger = await catalog.costLedger(for: usage.mixLedger)
                 costLedger.recordedTokensByDay = usage.recordedTokensByDay
                 guard !Task.isCancelled, refreshGeneration == generation else { return }
@@ -366,7 +368,10 @@ final class TokenBarStore: ObservableObject {
                 let key = homes.map(\.path).joined(separator: "\n") + ":\(reset.timeIntervalSince1970):\(minutes)"
                 if let result = codexWindows[key] { return result }
                 let result = await capture {
-                    try await CodexWindowSampler(codexHome: directory, additionalHomes: homes, accountID: accountID).update(
+                    try await CodexWindowSampler(
+                        codexHome: directory, additionalHomes: homes, accountID: accountID,
+                        weeklyResets: codexWeeklyResets()
+                    ).update(
                         windowStartedAt: reset.addingTimeInterval(-Double(minutes) * 60), resetsAt: reset
                     )
                 }
@@ -548,13 +553,17 @@ final class TokenBarStore: ObservableObject {
 
     func isStale(_ provider: ProviderScope) -> Bool {
         switch provider {
-        case .claude:
-            snapshot.claude.isStale
-        case .codex:
-            snapshot.codex.isStale
+        case .claude, .codex:
+            // Every account's percentage feeds the header and All, so any stale one marks them.
+            snapshot.accountRows(for: provider).contains { $0.quota.isStale }
         case .overview:
-            snapshot.claude.isStale || snapshot.codex.isStale
+            isStale(.claude) || isStale(.codex)
         }
+    }
+
+    /// The error of the first stale account behind a provider's header.
+    func staleError(_ provider: ProviderScope) -> String? {
+        snapshot.accountRows(for: provider).map(\.quota).first(where: \.isStale)?.error
     }
 
     func tokens(for provider: ProviderScope, period: ActivityPeriod) -> Int64 {
@@ -609,6 +618,15 @@ final class TokenBarStore: ObservableObject {
         }
         codexActivityCache = usage
         return usage
+    }
+
+    /// Each Codex login's current weekly reset by account ID; every token count records its login's reset.
+    private func codexWeeklyResets() -> [String: Date] {
+        let quotas = [(snapshot.codexAccountID, snapshot.codex)]
+            + (snapshot.additionalCodexAccounts ?? []).map { ($0.accountID, $0.quota) }
+        return quotas.reduce(into: [:]) { resets, entry in
+            if let id = entry.0, let reset = weeklyWindow(in: entry.1)?.resetsAt { resets[id] = reset }
+        }
     }
 
     private func codexDirectories(for directory: URL) -> (homes: [URL], accountID: String?) {
@@ -830,6 +848,11 @@ final class TokenBarStore: ObservableObject {
             return
         }
 
+        guard ledger.observedTokens > 0 else {
+            snapshot.claudeWeeklyValue = nil
+            snapshot.claudeWeeklyValueError = "No local usage in this weekly window yet."
+            return
+        }
         guard costMix.sampledTokens == ledger.observedTokens,
               costMix.missingModels.isEmpty,
               let observedCost = costMix.estimate(tokens: ledger.observedTokens), observedCost > 0 else {
@@ -1175,6 +1198,9 @@ final class TokenBarStore: ObservableObject {
     ) -> WeeklyValueStatus {
         guard let capacity else {
             return .unavailable("Waiting for enough weekly observations.")
+        }
+        guard observedTokens > 0 else {
+            return .unavailable("No local usage in this weekly window yet.")
         }
         guard costMix.missingModels.isEmpty,
               (!requiresExactTokenMatch || costMix.sampledTokens == observedTokens),
