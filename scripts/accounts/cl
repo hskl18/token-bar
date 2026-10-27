@@ -29,6 +29,12 @@ CODEX_ARGS = []
 APPLE_EPOCH = 978307200  # Token Bar saves dates as seconds since 2001-01-01.
 # Each login's last live reading, for when a login cannot be read live.
 CACHE = f"{HOME}/.cache/cl/quota.json"
+# One JSON line per launch: the pick, which readings were live, and any shared-history problem.
+LOG = f"{HOME}/.cache/cl/launch.log"
+# What the merge scripts link from each extra login to the primary one.
+SHARED = {"cl": ["projects", "file-history", "paste-cache", "session-env"],
+          "cdx": ["sessions", "archived_sessions", "thread-writer-locks", "history.jsonl", "session_index.jsonl",
+                  ".tmp/rollout-maintenance.lock"]}
 UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
@@ -260,6 +266,42 @@ def pick(homes, readings, now):
     return min(homes, key=lambda h: wait(readings[h][1], now))
 
 
+def shared_problems(command, homes):
+    """Signs that an update undid the shared history, checked on every launch; none before any merge."""
+    primary, others = homes[0], homes[1:]
+    names = SHARED[command]
+    def sqlite_home(home):
+        try:
+            with open(f"{home}/config.toml", "rb") as file:
+                value = tomllib.load(file).get("sqlite_home")
+        except (OSError, ValueError):  # ValueError covers bad TOML and bad UTF-8
+            return None
+        return value if isinstance(value, str) else None
+    if not (any(os.path.islink(os.path.join(home, name)) for home in others for name in names)
+            or command == "cdx" and sqlite_home(primary)):
+        return []
+    problems = [f"{home}/{name} is not linked to {primary}" for home in others for name in names
+                if os.path.realpath(os.path.join(home, name)) != os.path.realpath(os.path.join(primary, name))]
+    if command == "cdx":
+        for home in homes:
+            value = sqlite_home(home)
+            if not value or os.path.realpath(os.path.expanduser(value)) != os.path.realpath(primary):
+                problems.append(f"{home}/config.toml does not set sqlite_home to {primary}")
+        problems += [f"{home} has its own state_5.sqlite" for home in others if os.path.exists(f"{home}/state_5.sqlite")]
+    return problems
+
+
+def log_launch(entry):
+    """Append one line to LOG, starting a fresh file past 1 MB; logging never blocks a launch."""
+    try:
+        if os.path.exists(LOG) and os.path.getsize(LOG) > 1 << 20:
+            os.replace(LOG, LOG + ".1")
+        with open(LOG, "a") as file:
+            file.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
+
+
 def main():
     command = os.path.basename(sys.argv[0])
     tool = TOOLS[command]
@@ -270,6 +312,7 @@ def main():
         live = dict(zip(homes, pool.map(tool["live"], homes)))
     readings = {home: reading for home, reading in live.items() if reading}
     save_readings(readings, now)
+    saved = {}
     if len(readings) < len(homes):
         saved = saved_readings(tool)
         # A login with no reading at all ranks with the credit-only ones.
@@ -277,12 +320,24 @@ def main():
     home = pick(homes, readings, now)
     name = os.path.basename(home).lstrip(".").capitalize()
     left = room(readings[home][1], now)
+    # A saved reading can be stale, for example when an update changed how a login stores its credentials.
+    saved_note = "" if live.get(home) else ", saved reading" if home in saved else ", no reading"
     if left > 0:
-        print(f"{command}: {name} ({left:.0f}% left)", file=sys.stderr)
+        print(f"{command}: {name} ({left:.0f}% left{saved_note})", file=sys.stderr)
     else:
         frees = wait(readings[home][1], now)
         when = "at an unknown time" if frees == float("inf") else time.strftime("at %H:%M", time.localtime(now + frees))
-        print(f"{command}: every login is at a limit; {name} frees up first, {when}", file=sys.stderr)
+        print(f"{command}: every login is at a limit; {name} frees up first, {when}{saved_note}", file=sys.stderr)
+    try:
+        problems = shared_problems(command, homes)
+    except Exception as error:  # A launch must never fail on its own health check.
+        problems = [f"shared history check failed: {error!r}"]
+    if problems:
+        script = "claude-share-projects" if command == "cl" else "codex-share-home"
+        print(f"{command}: shared history needs repair, run {script}: {problems[0]}"
+              + (f" (+{len(problems) - 1} more)" if len(problems) > 1 else ""), file=sys.stderr)
+    log_launch({"at": datetime.fromtimestamp(now).isoformat(timespec="seconds"), "tool": command, "picked": home,
+                "left": round(left), "live": sorted(h for h, reading in live.items() if reading), "problems": problems})
 
     env = {key: value for key, value in os.environ.items() if key not in tool["credentials"] and key != tool["variable"]}
     if home != tool["unnamed"]:

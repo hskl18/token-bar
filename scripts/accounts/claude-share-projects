@@ -208,6 +208,10 @@ def main():
                     if leftovers:
                         sys.exit(f"{src} still holds {len(leftovers)} files; stopped before linking it")
                     shutil.move(src, os.path.join(backup, os.path.basename(account), name + "-empty-folders"))
+            elif os.path.lexists(src):
+                # An update can leave a file where the link was; it goes to the backup like any replaced file.
+                replaced.append(f"{name}: a file replaced the {os.path.basename(account)} link, set aside")
+                stash(src, account, name)
             if apply:
                 os.symlink(dst, src)
 

@@ -117,6 +117,16 @@ A login that cannot be read live uses the newer of its last live reading and Tok
 
 Codex looks a session name up only among the running login's own files, so `cdx resume <name>` and `cdx fork <name>` replace a session name with its ID from the shared database.
 
+## After updates
+
+Claude Code and Codex updates can change what these scripts rely on: where Claude Code keeps each login's credentials, and Codex's `sqlite_home` and linked folders.
+There is no need to rerun the merge scripts after every update.
+Every `cl` and `cdx` launch checks the shared links, `sqlite_home`, and re-created Codex databases, and prints `shared history needs repair, run <script>` when one is off.
+Rerunning that script restores a link an update replaced with a folder or file, keeping what it held in the backup, adds a missing `sqlite_home`, and sets aside a re-created Codex database.
+A link that points somewhere else, or a `sqlite_home` naming another folder, has to be fixed by hand; neither script overwrites it.
+A pick made from a saved reading instead of a live one ends with `saved reading`, which can mean an update changed how a login is read.
+Each launch appends one JSON line to `~/.cache/cl/launch.log` with the pick, the logins read live, and any problems; the file starts over past 1 MB.
+
 ## How Token Bar counts shared history
 
 Token Bar reads a linked folder once at its real path.
