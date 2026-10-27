@@ -65,8 +65,31 @@ enum CodexThreadTable {
         ledger.byModel.reduce(into: [:]) { $0[UsagePriceKey.model($1.key), default: [:]][$1.key] = $1.value }
     }
 
+    /// The folder `sqlite_home` in the login's `config.toml` names, as Codex reads it; otherwise the login's own folder.
+    static func databaseFolder(for codexHome: URL) -> URL {
+        let config = (try? String(contentsOf: codexHome.appendingPathComponent("config.toml"), encoding: .utf8)) ?? ""
+        // Top-level keys come before the first table header.
+        for line in config.split(separator: "\n").prefix(while: { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("[") }) {
+            let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            // A basic or literal string, optionally followed by a comment.
+            // shortcut: escapes in a basic string are not decoded; such a path falls back to the login's folder.
+            guard parts.count == 2, parts[0] == "sqlite_home", let quote = parts[1].first, quote == "\"" || quote == "'",
+                  let end = parts[1].dropFirst().firstIndex(of: quote) else { continue }
+            let value = parts[1][parts[1].index(after: parts[1].startIndex)..<end]
+            let rest = parts[1][parts[1].index(after: end)...].trimmingCharacters(in: .whitespaces)
+            guard rest.isEmpty || rest.hasPrefix("#"), quote == "'" || !value.contains("\\") else { continue }
+            let path = (String(value) as NSString).expandingTildeInPath
+            if path.hasPrefix("/") { return URL(fileURLWithPath: path, isDirectory: true) }
+        }
+        return codexHome
+    }
+
     private static func lostThreads(in codexHome: URL, accountID: String?, updatedSince start: Date) -> [LostThread] {
-        let database = codexHome.appendingPathComponent("state_5.sqlite")
+        let folder = databaseFolder(for: codexHome)
+        // Another login's database holds its creator-less threads too, so only this login's own count here.
+        let shared = folder.resolvingSymlinksInPath() != codexHome.resolvingSymlinksInPath()
+        if shared && accountID == nil { return [] }
+        let database = folder.appendingPathComponent("state_5.sqlite")
         var connection: OpaquePointer?
         defer { sqlite3_close(connection) }
         // A read-only open of this WAL database fails while no connection holds its -shm file;
@@ -83,7 +106,7 @@ enum CodexThreadTable {
         defer { sqlite3_finalize(statement) }
         let query = "SELECT id, rollout_path, model, tokens_used, created_at, updated_at, source, thread_source FROM threads"
             + " WHERE updated_at >= ?1 AND tokens_used > 0 AND model IS NOT NULL"
-            + " AND (?2 IS NULL OR creator_account_id IS NULL OR creator_account_id = ?2)"
+            + (shared ? " AND creator_account_id = ?2" : " AND (?2 IS NULL OR creator_account_id IS NULL OR creator_account_id = ?2)")
         guard sqlite3_prepare_v2(connection, query, -1, &statement, nil) == SQLITE_OK else { return [] }
         sqlite3_bind_int64(statement, 1, Int64(start.timeIntervalSince1970.rounded(.down)))
         if let accountID {

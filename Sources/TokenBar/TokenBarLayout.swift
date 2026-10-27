@@ -4,9 +4,11 @@ enum TokenBarLayout {
     static let panelWidth: CGFloat = 390
 
     static func panelHeight(for snapshot: AppSnapshot) -> CGFloat {
-        let codexRows = snapshot.primaryCodexYields ? -1 : max(0, snapshot.codex.displayWindows.count - 1)
+        let codexRows = snapshot.primaryCodexYields || !snapshot.codex.hasDisplayableData
+            ? -1 : max(0, snapshot.codex.displayWindows.count - 1)
+        let claudeRows = snapshot.claude.hasDisplayableData ? max(0, snapshot.claude.displayWindows.count - 2) : -2
         let extraRows = (snapshot.presentation.showsCodex ? codexRows : 0)
-            + (snapshot.presentation.showsClaude ? max(0, snapshot.claude.displayWindows.count - 2) : 0)
+            + (snapshot.presentation.showsClaude ? claudeRows : 0)
         let additionalRows = (snapshot.additionalClaudeAccounts ?? []).reduce(0) {
             $0 + max(1, $1.quota.displayWindows.count)
         } + (snapshot.visibleCodexAccounts).reduce(0) {

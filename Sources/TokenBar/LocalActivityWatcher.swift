@@ -29,7 +29,8 @@ final class LocalActivityWatcher {
         roots = sources.flatMap { source in
             let names = source.provider == .claude ? ["projects"] : ["sessions", "archived_sessions"]
             return names.map { name in
-                Root(path: source.url.appendingPathComponent(name).path,
+                // Events carry real paths, so a linked, shared folder reports to every account using it.
+                Root(path: source.url.appendingPathComponent(name).resolvingSymlinksInPath().path,
                      owner: source.directory, suffix: ".jsonl")
             }
         } + [Root(path: codexHome.appendingPathComponent("generated_images").path,

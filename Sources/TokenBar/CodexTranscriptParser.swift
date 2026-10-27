@@ -19,6 +19,24 @@ struct CodexTranscriptParseResult {
 struct CodexTranscriptParser {
     /// The folder's login. Sessions another login created, such as copies merged in from its folder, are skipped.
     var accountID: String? = nil
+    /// Real paths of the login's own folders, each ending in "/"; empty treats every file as its own.
+    var ownFolders: [String] = []
+    /// The login's current weekly reset and every other login's, from their quotas.
+    var ownWeeklyReset: Date?
+    var otherWeeklyResets: [Date] = []
+
+    /// `weeklyResets` maps each Codex login's account ID to its current weekly reset.
+    init(accountID: String? = nil, homes: [URL] = [], weeklyResets: [String: Date] = [:]) {
+        self.accountID = accountID
+        ownWeeklyReset = accountID.flatMap { weeklyResets[$0] }
+        otherWeeklyResets = weeklyResets.filter { $0.key != accountID }.map(\.value)
+        // realpath(3), as the file enumerator reports paths: `resolvingSymlinksInPath` drops a `/private` prefix.
+        ownFolders = homes.map { home in
+            guard let real = realpath(home.path, nil) else { return home.path + "/" }
+            defer { free(real) }
+            return String(cString: real) + "/"
+        }
+    }
 
     func parse(
         _ line: Data,
@@ -62,8 +80,21 @@ struct CodexTranscriptParser {
         guard type == "event_msg", payload?["type"] as? String == "token_count" else {
             return .ignored
         }
-        // shortcut: a copied session continued under this login stays with its creator; split by turn if that happens.
-        if let creator = cursor.creatorAccountID, let accountID, creator != accountID { return .ignored }
+        let mine: Bool
+        let servedBy = Self.weeklyReset(payload?["rate_limits"])
+        let near = { (reset: Date?) in servedBy.flatMap { served in reset.map { abs(served.timeIntervalSince($0)) < 60 } } ?? false }
+        let ownMatch = near(ownWeeklyReset), otherMatch = otherWeeklyResets.contains(where: near)
+        // Each count carries the serving login's windows, so a weekly reset only one login has settles whose
+        // usage it is, even in a session another login created and this one resumed.
+        if ownMatch != otherMatch {
+            mine = ownMatch
+        } else if let creator = cursor.creatorAccountID, let accountID {
+            // shortcut: a count from an older week goes to the session's creator; a rebuilt ledger can misplace resumed turns.
+            mine = creator == accountID
+        } else {
+            // A file reached through a `sessions` link into another login's folder counts only if this login created it.
+            mine = ownFolders.isEmpty || ownFolders.contains(where: path.hasPrefix)
+        }
 
         let info = payload?["info"] as? [String: Any]
         guard let totalRaw = info?["total_token_usage"] as? [String: Any],
@@ -75,8 +106,9 @@ struct CodexTranscriptParser {
 
         let lastUsage = (info?["last_token_usage"] as? [String: Any]).flatMap(tokenTotals)
         let delta = lastUsage ?? cursor.previousTotal.map { subtract(total, $0) } ?? total
+        // Another login's count still advances the total, so the next count of this login adds only its own usage.
         cursor.previousTotal = total
-        guard !isEmpty(delta) else { return .ignored }
+        guard mine, !isEmpty(delta) else { return .ignored }
 
         guard let timestamp = root["timestamp"] as? String,
               let date = Self.parseDate(timestamp)
@@ -120,6 +152,15 @@ struct CodexTranscriptParser {
             ),
             malformed: false
         )
+    }
+
+    /// The reset of the longest window in a token count's `rate_limits`, which is the login's weekly window.
+    static func weeklyReset(_ rateLimits: Any?) -> Date? {
+        let limits = rateLimits as? [String: Any]
+        let windows = ["primary", "secondary"].compactMap { limits?[$0] as? [String: Any] }
+        guard let weekly = windows.max(by: { ($0["window_minutes"] as? Int ?? 0) < ($1["window_minutes"] as? Int ?? 0) }),
+              let reset = weekly["resets_at"] as? Int else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(reset))
     }
 
     /// The cursor key of a rollout with this session ID, which is also its Codex thread ID.

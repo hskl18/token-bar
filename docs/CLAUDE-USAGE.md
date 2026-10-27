@@ -51,6 +51,9 @@ Claude Code writes assistant usage records under:
 
 Token Bar reads those files in 1 MB chunks on utility tasks.
 Activity cards sum every Claude folder's history, and each extra account's own `projects` folder also supplies its weekly estimate.
+An extra account may link its `projects` folder to `~/.claude/projects` so every account can resume every session.
+Transcripts name no account, so a `SessionStart` hook that appends `{"sessionId", "configDir", "at"}` lines to `~/.claude/account-sessions.jsonl` decides which account each record belongs to.
+A record goes to the folder its session last started under before that record, and a session with no line stays with the folder that holds the file.
 The first scan backfills the available calendar year.
 Later scans read bytes appended after each saved cursor.
 

@@ -39,6 +39,7 @@ plutil -lint "build/Token Bar.app/Contents/Info.plist"
 ```
 
 These commands verify the source, package, signature structure, and property list.
+The [shared-account scripts](SHARED-ACCOUNTS.md) in `scripts/accounts` have no automated tests; run them without `--apply` first, which changes nothing.
 They do not replace testing on each supported macOS version and architecture.
 
 ## Public source release

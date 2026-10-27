@@ -40,8 +40,11 @@ Folders the server reports as the same login share one quota request and appear 
 Their local records share one incremental ledger, and each refresh scans that account's calendar and weekly window once.
 Activity selection uses its own successful-read timestamp rather than the freshness of the quota row.
 Extra accounts add quota rows, a weekly estimate from their own local sessions, and their usage to the activity cards.
+Accounts can also share one history through linked folders; see [Shared accounts](SHARED-ACCOUNTS.md).
 
 The presentation layer derives one of four states from displayable provider data: none, Claude-only, Codex-only, or both.
+Any account of a provider counts, so a provider whose only signed-in login is an extra folder still shows its activity, header, and All.
+A header and All are marked stale when any account whose percentage they include is stale.
 Only the dual-provider state renders All, and each state has its own compact panel height.
 Both providers show every returned quota window, and the panel grows for extra rows until it reaches 85% of the screen height, after which the quota area scrolls.
 The UI lists 5-hour rows, then Weekly rows, then any others, keeping account order and the main Codex bucket first.
@@ -66,12 +69,14 @@ The scroll viewport fills the card, with separate content and indicator margins 
 `ClaudeWindowSampler` owns the current official Claude weekly interval.
 Both use the same Claude record parser and the same `message.id + requestId` identity.
 The parser keeps per-message token maxima so later streamed snapshots add only their positive deltas.
+A linked `projects` folder is read once at its real path, and `ClaudeSessionOwners` splits its records by account using `~/.claude/account-sessions.jsonl`.
 
 `CodexTranscriptParser` owns Codex schema interpretation, token delta normalization, model context, stable identity, and fork/subagent copied-history suppression.
 `CodexWindowSampler` uses it for the current official weekly interval.
 `CodexMixSampler` uses it for the available calendar year.
 Both Codex samplers scan `sessions` and `archived_sessions`, and pricing keys record each request's speed tier and long-context use.
 `CodexThreadTable` adds threads whose rollout files are gone to both samplers' results, less the cumulative total each session's last scan read.
+A linked `sessions` folder is read once at its real path, each token count goes to the login whose current weekly reset it records, and the thread table follows a top-level `sqlite_home`.
 
 Sharing the parser keeps local schema interpretation consistent.
 Account and local sources can still differ in scope and timing; see [pricing limits](PRICING.md#limits).
@@ -89,6 +94,7 @@ The affected dollar value remains available only when known prices cover at leas
 - Codex quota and account-activity results are independent even though they share one app-server process.
 - Local calendar scans and current-window scans keep separate persisted cursors.
 - Network and parse failures preserve prior successful snapshots.
+- Cancelling a refresh terminates its Codex app-server child and skips the remaining runtimes; spending a reset credit cannot be cancelled.
 - Claude HTTP 401 can trigger one CLI renewal before reporting failure; see [credential recovery](CLAUDE-USAGE.md#credential-recovery).
 - Fetch and local-scan failures turn the footer time yellow, with details in its tooltip.
 - Price refresh failure preserves the last-known-good catalog.

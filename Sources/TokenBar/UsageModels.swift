@@ -564,7 +564,9 @@ struct AppSnapshot: Codable, Hashable {
 
     var presentation: ProviderPresentation {
         let hasClaude = claude.hasDisplayableData
+            || (additionalClaudeAccounts ?? []).contains { $0.quota.hasDisplayableData }
         let hasCodex = codex.hasDisplayableData
+            || (additionalCodexAccounts ?? []).contains { $0.quota.hasDisplayableData }
         switch (hasClaude, hasCodex) {
         case (false, false): return .none
         case (true, false): return .claudeOnly
