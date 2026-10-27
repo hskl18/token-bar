@@ -120,7 +120,8 @@ def codex_usage(home):
                                   stderr=subprocess.DEVNULL, env=env, cwd=home, text=True)
     except OSError:
         return None
-    timer = threading.Timer(5, server.kill)
+    # A cold start over a large shared history took 4-6 s in testing, against about 1 s warm.
+    timer = threading.Timer(10, server.kill)
     timer.start()
     try:
         call(server, {"method": "initialize", "id": 1, "params": {"clientInfo": {"name": "cdx", "title": "cdx", "version": "1"}}})

@@ -108,7 +108,7 @@ cl --continue
 cdx resume --last
 ```
 
-Both launchers read each login's quota live, from Claude's usage endpoint or from `codex app-server`, which takes about a second.
+Both launchers read each login's quota live, from Claude's usage endpoint or from `codex app-server`, which usually takes about a second; a Codex cold start over a large shared history can take several seconds.
 They pick the login with the most room in its tightest window.
 Credit-only logins, such as an Enterprise trial, come last.
 When every login is at a limit, they pick the one that frees up first.
