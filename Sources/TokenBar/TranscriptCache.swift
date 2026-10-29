@@ -31,10 +31,22 @@ enum TranscriptCache {
         }
     }
 
+    private struct Window: Decodable { var resetsAt: Date }
+
     static func removeObsolete() {
         let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
-        for file in files where StorageKeys.isObsolete(file.deletingPathExtension().lastPathComponent) {
-            try? FileManager.default.removeItem(at: file)
+        for file in files {
+            let key = file.deletingPathExtension().lastPathComponent
+            // A weekly window ledger is reused only for its own window, so it is dead once that window resets.
+            // Usage ledgers stay: they can hold history whose source files are gone.
+            let isWindow = [StorageKeys.claudeWindowLedger, StorageKeys.codexWindowLedger]
+                .contains { key == $0 || key.hasPrefix($0 + ".") }
+            let expired = isWindow && (try? Data(contentsOf: file))
+                .flatMap { try? JSONDecoder().decode(Window.self, from: $0) }
+                .map { $0.resetsAt < Date() } == true
+            if StorageKeys.isObsolete(key) || expired {
+                try? FileManager.default.removeItem(at: file)
+            }
         }
     }
 }
