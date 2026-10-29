@@ -105,6 +105,7 @@ The affected dollar value remains available only when known prices cover at leas
 
 The app reads JSONL files in 1 MiB chunks on utility tasks.
 Transcript ledgers are atomic JSON files under Application Support, written once per completed scan.
+Launch removes weekly window ledgers whose reset time has passed and keeps calendar ledgers, which can hold history whose source files are gone.
 Snapshots, prices, and bounded capacity samples stay in `UserDefaults`.
 It does not retain raw transcript text.
 Activity cards and their tooltips reuse one in-memory summary per provider and calendar period.
