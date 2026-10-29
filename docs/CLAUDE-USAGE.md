@@ -12,6 +12,8 @@ The allowance has no reset time, so Token Bar uses the start of the next UTC mon
 Token Bar reads the existing Claude Code OAuth credential from macOS Keychain through `/usr/bin/security`.
 It does not ask the user to paste or store another token.
 An extra account in a `~/.claude-*` folder uses that folder's own Keychain entry, as Claude Code does for `CLAUDE_CONFIG_DIR`.
+Folders signed in to the same login show one row, read with the first folder's credential.
+When `~/.claude` has no credential, `~/.claude.json` names no login, and another Claude folder is signed in, `~/.claude` only holds shared history, so Token Bar shows no row or error for it.
 
 The endpoint can return HTTP 429 after repeated requests.
 Token Bar keeps the last successful quota value, marks it stale, and records a cooldown.
@@ -50,10 +52,14 @@ Claude Code writes assistant usage records under:
 ```
 
 Token Bar reads those files in 1 MB chunks on utility tasks.
-Activity cards sum every Claude folder's history, and each extra account's own `projects` folder also supplies its weekly estimate.
+Activity cards sum every Claude folder's history, and the `projects` folders of every folder signed in to a login supply that login's weekly estimate.
 An extra account may link its `projects` folder to `~/.claude/projects` so every account can resume every session.
-Transcripts name no account, so a `SessionStart` hook that appends `{"sessionId", "configDir", "at"}` lines to `~/.claude/account-sessions.jsonl` decides which account each record belongs to.
-A record goes to the folder its session last started under before that record, and a session with no line stays with the folder that holds the file.
+Transcripts name no account, so a `SessionStart` hook that appends `{"sessionId", "configDir", "account", "at"}` lines to `~/.claude/account-sessions.jsonl` decides which account each record belongs to.
+A record goes to the login its session last started under before that record.
+A line's `account` names that login, so its sessions stay with it when it moves to another folder that shares `projects`.
+A line with an empty `account`, written while its folder was signed out, or with none, written before the hook recorded logins, goes to its folder.
+A session with no line stays with the folder that holds the file.
+The hook records the folder's login, so a session on an API key in a signed-in folder still counts for that login.
 The first scan backfills the available calendar year.
 Later scans read bytes appended after each saved cursor.
 

@@ -136,6 +136,7 @@ struct ClaudeAccountSnapshot: Codable, Hashable, Identifiable {
     var sourceDirectory: String
     var quota: ProviderSnapshot
     var weeklyValue: WeeklyValueEstimate? = nil
+    var weeklyCapacityHistory: WeeklyCapacityHistory? = nil
 }
 
 struct CodexAccountSnapshot: Codable, Hashable, Identifiable {

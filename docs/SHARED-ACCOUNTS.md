@@ -1,14 +1,14 @@
 # Shared accounts
 
 Tested on October 26, 2026 with Claude Code 2.1.311 and Codex CLI 0.164.0 on macOS.
-With several Claude or Codex logins, these scripts give every login one shared history and start each session on the login with the most quota left.
+With several Claude or Codex logins, these scripts give every login one shared history and start each session on the login whose quota should be used first.
 Token Bar keeps counting each login's usage separately.
 
 The scripts live in [`scripts/accounts/`](../scripts/accounts/):
 
 | Script | Job |
 | --- | --- |
-| `cl` | Starts Claude Code, or Codex when called as `cdx`, on the login with the most room |
+| `cl` | Starts Claude Code, or Codex when called as `cdx`, on the login whose quota should be used first |
 | `claude-share-projects` | One-time merge of every `~/.claude-*` login's history into `~/.claude` |
 | `codex-share-home` | One-time merge of one `~/.codex-*` login's history into `~/.codex` |
 
@@ -41,7 +41,8 @@ To pass the same Codex arguments on every `cdx` run, such as one model, edit `CO
 ## Share Claude history
 
 Claude Code transcripts name no account, so after the merge Token Bar needs a record of which login started each session.
-Add this hook, with no `matcher`, to `settings.json` in `~/.claude` and in every `~/.claude-*` login, or link those files to one shared `settings.json`:
+Add this hook, with no `matcher`, to `settings.json` in `~/.claude` and in every `~/.claude-*` login, or link those files to one shared `settings.json`.
+It records the folder and the login signed in there, so a login keeps its sessions when it moves to another folder:
 
 ```json
 {
@@ -51,7 +52,7 @@ Add this hook, with no `matcher`, to `settings.json` in `~/.claude` and in every
         "hooks": [
           {
             "type": "command",
-            "command": "jq -c --arg d \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}\" --arg t \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" '{sessionId: .session_id, configDir: $d, at: $t}' >> \"$HOME/.claude/account-sessions.jsonl\""
+            "command": "jq -c --arg d \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}\" --arg a \"$(jq -r '.oauthAccount // empty | .accountUuid + \":\" + (.organizationUuid // \"\")' \"${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json\" 2>/dev/null)\" --arg t \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" '{sessionId: .session_id, configDir: $d, account: $a, at: $t}' >> \"$HOME/.claude/account-sessions.jsonl\""
           }
         ]
       }
@@ -73,6 +74,21 @@ For other files that differ, the newer copy wins.
 Duplicates and replaced copies move to `~/.claude-share-backup-<time>/`; nothing is deleted.
 Credentials, `sessions`, and settings stay with each login.
 `--apply` refuses while a Claude Code session runs or while a login lacks the hook, including a hook limited by a `matcher`, since resumed, cleared, and forked sessions also start under another login.
+
+## Keep `~/.claude` as the shared folder only
+
+A tool that runs `claude auth logout` without `CLAUDE_CONFIG_DIR` signs out the login in `~/.claude`.
+To keep every login out of its reach, sign in only in `~/.claude-*` folders and leave `~/.claude` signed out, holding only the shared history.
+Move the login with `CLAUDE_CONFIG_DIR=~/.claude-main claude auth login`, then link the new folder's history and settings like the other logins.
+Token Bar then shows no row or sign-in error for `~/.claude`, and `cl` treats it as signed out, so it picks it last.
+Plain `claude` and editor extensions that start Claude Code without `CLAUDE_CONFIG_DIR` then ask for a login, so start sessions with `cl` or a launcher that sets the folder.
+Sessions started before the hook recorded `account` stay with the folder they started in; to move them, append a copy of each of their `account-sessions.jsonl` lines naming the new folder.
+Then quit Token Bar and delete the `tokenbar.claude-window-ledger.*.json` files under `~/Library/Application Support/Token Bar/Ledgers/`, which it rebuilds on the next refresh.
+
+## One login in several folders
+
+Token Bar counts a login once even when several folders are signed in to it.
+Its row reads the quota with the first folder's credential, and its weekly estimate counts sessions started in every one of those folders.
 
 ## Share Codex history
 
@@ -109,13 +125,27 @@ cdx resume --last
 ```
 
 Both launchers read each login's quota live, from Claude's usage endpoint or from `codex app-server`, which usually takes about a second; a Codex cold start over a large shared history can take several seconds.
-They pick the login with the most room in its tightest window.
+They measure room in Pro-sized windows: a Claude Max 5x login counts five times its percentage and Max 20x twenty times, read from each login's `.claude.json`; these ratios are estimates, and Codex logins count once.
+Among logins with at least 40% of a Pro-sized window left in their tightest window, they pick the one whose weekly window resets first, so quota that would expire unused goes first; equal resets go to the one with the most room.
+A saved reading from before launchers recorded the weekly reset uses its latest reset instead.
+When no login has that much, they pick the one with the most room.
 Credit-only logins, such as an Enterprise trial, come last.
 When every login is at a limit, they pick the one that frees up first.
 A login that cannot be read live uses the newer of its last live reading and Token Bar's.
 `cdx` treats a Codex login as blocked when Codex itself would: ordinary usage disallowed without credits, a spend control, a reached limit, or a limit on the model the run uses.
 
 Codex looks a session name up only among the running login's own files, so `cdx resume <name>` and `cdx fork <name>` replace a session name with its ID from the shared database.
+
+Scripts that start many sessions, such as evaluations through the Agent SDK, inherit whatever folder their shell names.
+`--which` picks a login the same way and prints its folder instead of starting a session:
+
+```sh
+CLAUDE_CONFIG_DIR=$(cl --which) python eval.py
+CODEX_HOME=$(cdx --which) ./batch.sh
+```
+
+It prints an empty line when it picks `~/.claude`, which Claude Code reads like an unset variable.
+Unlike a launch, it leaves inherited credential variables such as `ANTHROPIC_API_KEY` in place and writes no line to the launch log.
 
 ## After updates
 

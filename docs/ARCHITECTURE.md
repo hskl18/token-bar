@@ -39,7 +39,8 @@ Each Codex account runs its own app-server child with `CODEX_HOME` set, inherite
 Folders the server reports as the same login share one quota request and appear once, preferring a fresh reading.
 Their local records share one incremental ledger, and each refresh scans that account's calendar and weekly window once.
 Activity selection uses its own successful-read timestamp rather than the freshness of the quota row.
-Extra accounts add quota rows, a weekly estimate from their own local sessions, and their usage to the activity cards.
+Claude folders signed in to the same login appear once, read with the first folder's credential, and their sessions share that login's weekly window scan.
+Extra accounts add quota rows, a weekly estimate from their login's local sessions, and their usage to the activity cards.
 Accounts can also share one history through linked folders; see [Shared accounts](SHARED-ACCOUNTS.md).
 
 The presentation layer derives one of four states from displayable provider data: none, Claude-only, Codex-only, or both.

@@ -36,7 +36,7 @@ To keep a copy on the Desktop, copy `build/Token Bar.app` there in Finder and do
 
 Sign in to Claude Code, Codex CLI, or Codex Desktop before refreshing Token Bar.
 Extra accounts in `~/.claude-*` and `~/.codex-*` folders appear automatically; see [Architecture](docs/ARCHITECTURE.md#accounts).
-To share one history across those accounts and start each session on the one with the most quota left, see [Shared accounts](docs/SHARED-ACCOUNTS.md).
+To share one history across those accounts and start each session on the one whose quota should be used first, see [Shared accounts](docs/SHARED-ACCOUNTS.md).
 Token Bar uses the installed Claude CLI to renew expired sign-ins and to start idle 5-hour windows; see [Claude usage](docs/CLAUDE-USAGE.md).
 Building and running the app does not require administrator access.
 macOS may request access to the user's login Keychain for Claude usage data.
