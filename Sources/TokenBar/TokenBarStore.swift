@@ -20,6 +20,8 @@ final class TokenBarStore: ObservableObject {
     private var refreshGeneration = 0
     private var profileSyncAt: Date?
     private var claudeProfiles: [ClaudeAccountProfile] = []
+    // Extra folders signed in to the primary folder's login, which its weekly estimate also counts.
+    private var claudePrimaryAliases: [URL] = []
     // Every extra Claude folder counts toward Claude totals, even one that repeats a login.
     private var claudeDirectories: [URL] = []
     private var codexProfiles: [CodexAccountProfile] = []
@@ -166,7 +168,7 @@ final class TokenBarStore: ObservableObject {
         let claudeHome = AccountSource.primaryDirectory(for: .claude)
         let codexHome = AccountSource.primaryDirectory(for: .codex)
         let scanCodex = includes(.codex, codexHome)
-        let scanClaude = includes(.claude, claudeHome)
+        let scanClaude = ([claudeHome] + claudePrimaryAliases).contains { includes(.claude, $0) }
         let shouldRefreshCodex = scanCodex
             && shouldAttempt(snapshot.codex, force: force, at: attemptedAt)
         let shouldRefreshClaude = scanClaude
@@ -174,7 +176,8 @@ final class TokenBarStore: ObservableObject {
         let claudeAccountsToRefresh = claudeProfiles.filter { profile in
             let quota = snapshot.additionalClaudeAccounts?
                 .first(where: { $0.id == profile.id })?.quota ?? .empty
-            return includes(.claude, profile.configDirectory) && shouldAttempt(quota, force: force, at: attemptedAt)
+            return ([profile.configDirectory] + profile.aliases).contains { includes(.claude, $0) }
+                && shouldAttempt(quota, force: force, at: attemptedAt)
         }
         let codexAccountsToRefresh = codexProfiles.filter { profile in
             let quota = snapshot.additionalCodexAccounts?
@@ -389,7 +392,14 @@ final class TokenBarStore: ObservableObject {
                     claudeSucceeded = true
                     if hasIdleSessionWindow(result) { idleClaudeProfiles.append(nil) }
                 case let .failure(error):
-                    recordFailure(error, in: &snapshot.claude, at: attemptedAt)
+                    if case .credentialMissing? = error as? ClaudeClientError, snapshot.claudeAccountID == nil,
+                       claudeProfiles.contains(where: { $0.accountID != nil }) {
+                        // A signed-out ~/.claude beside other Claude logins only holds their shared history.
+                        snapshot.claude = .empty
+                        snapshot.claude.lastAttemptAt = attemptedAt
+                    } else {
+                        recordFailure(error, in: &snapshot.claude, at: attemptedAt)
+                    }
                 }
             }
             idleClaudeProfiles += applyClaudeAccountResults(
@@ -397,12 +407,16 @@ final class TokenBarStore: ObservableObject {
             ).map(Optional.init)
             startClaudeWindows(idleClaudeProfiles)
             for profile in claudeAccountsToRefresh {
-                guard let quota = snapshot.additionalClaudeAccounts?.first(where: { $0.id == profile.id })?.quota
+                guard let account = snapshot.additionalClaudeAccounts?.first(where: { $0.id == profile.id })
                 else { continue }
-                let weeklyValue = await claudeProfileWeeklyValue(quota: quota, directory: profile.configDirectory, catalog: catalog)
+                var history = account.weeklyCapacityHistory ?? .empty
+                let weeklyValue = await claudeProfileWeeklyValue(
+                    quota: account.quota, profile: profile, catalog: catalog, history: &history
+                )
                 guard !Task.isCancelled, refreshGeneration == generation else { return }
                 if let index = snapshot.additionalClaudeAccounts?.firstIndex(where: { $0.id == profile.id }) {
                     snapshot.additionalClaudeAccounts?[index].weeklyValue = weeklyValue
+                    snapshot.additionalClaudeAccounts?[index].weeklyCapacityHistory = history
                 }
             }
             var estimatedCodexGroups = Set<String>()
@@ -442,8 +456,9 @@ final class TokenBarStore: ObservableObject {
                let resetsAt = weeklyWindow.resetsAt {
                 snapshot.claudeWeeklyValueError = "Updating the exact local weekly window..."
                 let windowStartedAt = resetsAt.addingTimeInterval(-Double(durationMinutes) * 60)
+                let sampler = ClaudeWindowSampler(aliases: claudePrimaryAliases, accountID: snapshot.claudeAccountID)
                 claudeWindowResult = await capture {
-                    try await ClaudeWindowSampler().update(
+                    try await sampler.update(
                         windowStartedAt: windowStartedAt,
                         resetsAt: resetsAt
                     )
@@ -723,7 +738,7 @@ final class TokenBarStore: ObservableObject {
             return [currentEstimate(snapshot.claudeWeeklyValue, quota: snapshot.claude, allowsPrior: true)]
                 .compactMap { $0 }.map { (snapshot.claudeAccountID, $0) }
                 + (snapshot.additionalClaudeAccounts ?? []).compactMap { account in
-                    currentEstimate(account.weeklyValue, quota: account.quota).map { (account.id, $0) }
+                    currentEstimate(account.weeklyValue, quota: account.quota, allowsPrior: true).map { (account.id, $0) }
                 }
         case .codex:
             // Choose estimates independently of quota-row visibility, one per confirmed account.
@@ -797,7 +812,7 @@ final class TokenBarStore: ObservableObject {
         let base = provider == .codex
             ? "Sum of available account projections. Integer quota percentages, speed modes"
                 + " and other devices can affect accuracy."
-            : "Sum of available account projections; the primary account's is smoothed in dollars."
+            : "Sum of available account projections, each smoothed in dollars with its earlier weeks."
                 + " Proportionality to subscription quota is an assumption."
         guard provider == .codex, snapshot.codexWeeklyValue != nil, !snapshot.codex.isStale,
               let usage = snapshot.imageGenerationUsage,
@@ -1152,22 +1167,35 @@ final class TokenBarStore: ObservableObject {
         snapshot.additionalCodexAccounts?[index] = account
     }
 
-    /// An extra account's estimate from its own current-window records, without cross-window smoothing.
+    /// An extra account's estimate from its login's current-window records in every folder signed in to it,
+    /// smoothed with its own earlier windows like the primary account's.
     private func claudeProfileWeeklyValue(
-        quota: ProviderSnapshot, directory: URL, catalog: PriceCatalog
+        quota: ProviderSnapshot, profile: ClaudeAccountProfile, catalog: PriceCatalog,
+        history: inout WeeklyCapacityHistory
     ) async -> WeeklyValueEstimate? {
-        guard !quota.isStale, let window = weeklyWindow(in: quota), window.usedPercent >= 3,
+        guard !quota.isStale, let window = weeklyWindow(in: quota),
               let minutes = window.windowMinutes, let reset = window.resetsAt, reset > Date()
         else { return nil }
-        let start = reset.addingTimeInterval(-Double(minutes) * 60)
-        let ledger: (mix: MixLedger, tokens: Int64)? = (try? await ClaudeWindowSampler(configDirectory: directory)
-            .update(windowStartedAt: start, resetsAt: reset))
-            .flatMap { $0.isComplete && $0.parseErrors == 0 ? ($0.mixLedger, $0.observedTokens) : nil }
-        guard let ledger, ledger.tokens > 0 else { return nil }
-        let mix = await catalog.costMix(for: ledger.mix)
+        let sampler = ClaudeWindowSampler(
+            configDirectory: profile.configDirectory, aliases: profile.aliases, accountID: profile.accountID
+        )
+        guard let ledger = try? await sampler.update(
+                  windowStartedAt: reset.addingTimeInterval(-Double(minutes) * 60), resetsAt: reset
+              ),
+              ledger.isComplete, ledger.parseErrors == 0, ledger.observedTokens > 0
+        else { return nil }
+        let mix = await catalog.costMix(for: ledger.mixLedger)
+        // Only an exactly priced window may enter the history that later weeks are smoothed with.
+        guard mix.sampledTokens == ledger.observedTokens, mix.missingModels.isEmpty,
+              let observedCost = mix.estimate(tokens: ledger.observedTokens), observedCost > 0
+        else { return nil }
+        let capacity = WeeklyCapacityEstimator.update(
+            history: &history, window: window, observedTokens: ledger.observedTokens,
+            observedCostUSD: observedCost, observedAt: ledger.observedAt, source: "local"
+        )
         guard case let .available(estimate) = weeklyValueEstimate(
-            capacity: currentCapacity(window: window, observedTokens: ledger.tokens),
-            observedTokens: ledger.tokens, costMix: mix, requiresExactTokenMatch: true, resetsAt: reset
+            capacity: capacity, observedTokens: ledger.observedTokens, costMix: mix,
+            requiresExactTokenMatch: true, resetsAt: reset
         ) else { return nil }
         return estimate
     }
@@ -1374,14 +1402,16 @@ final class TokenBarStore: ObservableObject {
             return sources.filter { $0.provider == provider && seen.insert($0.directory).inserted }.map(\.url)
         }
         claudeDirectories = directories(for: .claude)
-        claudeProfiles = ClaudeAccountProfile.discover(in: claudeDirectories, primaryID: claudeID)
+        (claudeProfiles, claudePrimaryAliases) = ClaudeAccountProfile.discover(in: claudeDirectories, primaryID: claudeID)
         let previousClaude = snapshot.additionalClaudeAccounts ?? []
         let claudeAccounts = claudeProfiles.map { profile in
-            ClaudeAccountSnapshot(
+            let cached = previousClaude.first(where: { $0.id == profile.id })
+            return ClaudeAccountSnapshot(
                 id: profile.id, name: profile.name,
                 sourceDirectory: profile.configDirectory.path,
-                quota: previousClaude.first(where: { $0.id == profile.id })?.quota ?? .empty,
-                weeklyValue: previousClaude.first(where: { $0.id == profile.id })?.weeklyValue
+                quota: cached?.quota ?? .empty,
+                weeklyValue: cached?.weeklyValue,
+                weeklyCapacityHistory: cached?.weeklyCapacityHistory
             )
         }
         next.additionalClaudeAccounts = claudeAccounts.isEmpty ? nil : claudeAccounts

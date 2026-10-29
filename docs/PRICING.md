@@ -95,7 +95,8 @@ If the account counter has not increased or still trails a complete local weekly
 The estimate stays unavailable without a current-window sample or priced model mix, instead of preserving a stale dollar amount.
 Every displayed weekly estimate is bound to its reset time and current percentage; stale or expired readings are excluded.
 With several accounts, a provider header sums each account's available estimate, counting the same login once.
-Extra accounts project only their own current-window records, without the primary Claude account's smoothing.
+Each Claude account, primary or extra, smooths its projection with its own earlier windows.
+Extra Codex accounts project only their own current-window records.
 
 Claude uses available local records inside the official 7-day interval.
 Its current-window observations become eligible at 3% used.

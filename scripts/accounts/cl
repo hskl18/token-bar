@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start Claude Code (`cl`) or Codex (`cdx`) on the login with the most quota left.
+"""Start Claude Code (`cl`) or Codex (`cdx`) on the login whose quota should be used first.
 
 The logins are ~/.claude and every signed-in ~/.claude-* folder, and ~/.codex and every signed-in ~/.codex-*
 folder, found the way Token Bar finds them. Each login's quota is read live; a login that cannot be read
@@ -35,6 +35,10 @@ LOG = f"{HOME}/.cache/cl/launch.log"
 SHARED = {"cl": ["projects", "file-history", "paste-cache", "session-env"],
           "cdx": ["sessions", "archived_sessions", "thread-writer-locks", "history.jsonl", "session_index.jsonl",
                   ".tmp/rollout-maintenance.lock"]}
+# A login is comfortable with this much room in its tightest window, in percent of a Pro-sized window.
+RESERVE = 40
+# Pro-sized windows per Claude plan, from `organizationRateLimitTier`; estimates, since only the 5-hour ratio is published.
+TIERS = {"default_claude_max_5x": 5, "default_claude_max_20x": 20}
 UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
@@ -83,7 +87,7 @@ def claude_usage(home):
         # 44 is errSecItemNotFound: signed out, so only a last resort, like a full login.
         # Any other failure, such as a locked Keychain, stays unknown.
         if found.returncode == 44:
-            return False, [(100, None)]
+            return False, [(100, None)], None
         oauth = json.loads(found.stdout)["claudeAiOauth"]
         if oauth["expiresAt"] / 1000 < time.time() + 60:
             return None  # Only Claude Code may refresh it; a refresh here would rotate its login away.
@@ -96,8 +100,9 @@ def claude_usage(home):
     timed = [w for w in (usage.get("five_hour"), usage.get("seven_day")) if w]
     # Credit-only plans, such as the Enterprise trial, have no time windows.
     found = timed or [w for w in [usage.get("extra_usage")] if w]
-    return bool(timed), [(w.get("utilization") or 0, w.get("resets_at") and datetime.fromisoformat(w["resets_at"]).timestamp())
-                         for w in found]
+    weekly = (usage.get("seven_day") or {}).get("resets_at")
+    return (bool(timed), [(w.get("utilization") or 0, w.get("resets_at") and datetime.fromisoformat(w["resets_at"]).timestamp())
+                          for w in found], weekly and datetime.fromisoformat(weekly).timestamp())
 
 
 def codex_usage(home):
@@ -128,7 +133,7 @@ def codex_usage(home):
         server.stdin.write(json.dumps({"method": "initialized", "params": {}}) + "\n")
         reply = call(server, {"method": "account/rateLimits/read", "id": 2, "params": {"excludeResetCreditDetails": True}})
         if "authentication" in str((reply or {}).get("error", {}).get("message", "")):
-            return False, [(100, None)]  # Signed out: only a last resort, like a full login.
+            return False, [(100, None)], None  # Signed out: only a last resort, like a full login.
         result = reply["result"]
         limits = (result.get("rateLimitsByLimitId") or {}).get("codex") or result["rateLimits"]
     except Exception:
@@ -150,7 +155,7 @@ def codex_usage(home):
     if (model and model in (banner.get("blocked_model_slug"), banner.get("model_slug"))
             and banner.get("banner_type") == "selected_model_limit"):
         found.append((100, banner.get("reset_at")))
-    return bool(windows), found
+    return bool(windows), found, next((w.get("resetsAt") for w in windows if w.get("windowDurationMins") == 7 * 24 * 60), None)
 
 
 def session_by_name(args, homes):
@@ -186,6 +191,7 @@ TOOLS = {
         "credentials": ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
         "snapshot": ("claude", "additionalClaudeAccounts"),
         "live": claude_usage,
+        "weight": lambda home: claude_weight(home),
     },
     "cdx": {
         "homes": logins(f"{HOME}/.codex", ".codex-", ["auth.json", "config.toml"]),
@@ -195,6 +201,7 @@ TOOLS = {
         "credentials": ("CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_SQLITE_HOME"),
         "snapshot": ("codex", "additionalCodexAccounts"),
         "live": codex_usage,
+        "weight": lambda home: 1,  # Codex readings name no plan size; equal plans are assumed.
     },
 }
 
@@ -203,7 +210,7 @@ def saved_readings(tool):
     """The newest saved reading per login, from this launcher's cache or Token Bar: {home: (time, reading)}."""
     try:
         with open(CACHE) as file:
-            saved = {home: (entry["at"], (entry["timed"], [tuple(w) for w in entry["windows"]]))
+            saved = {home: (entry["at"], (entry["timed"], [tuple(w) for w in entry["windows"]], entry.get("weekly")))
                      for home, entry in json.load(file).items()}
     except (OSError, ValueError, KeyError, TypeError):
         saved = {}
@@ -230,7 +237,8 @@ def save_readings(readings, now):
             cache = json.load(file)
     except (OSError, ValueError):
         cache = {}
-    cache.update({home: {"at": now, "timed": timed, "windows": windows} for home, (timed, windows) in readings.items()})
+    cache.update({home: {"at": now, "timed": timed, "windows": windows, "weekly": weekly}
+                  for home, (timed, windows, weekly) in readings.items()})
     try:
         os.makedirs(os.path.dirname(CACHE), exist_ok=True)
         with open(CACHE + f".{os.getpid()}", "w") as file:
@@ -243,8 +251,10 @@ def save_readings(readings, now):
 def token_bar_windows(quota):
     timed = [w for w in (quota.get("shortWindow"), quota.get("longWindow")) if w]
     found = timed or [w for w in quota.get("extraWindows") or [] if w.get("limitID") == "claude:extra_usage"]
-    return bool(timed), [(w.get("usedPercent") or 0, None if w.get("resetsAt") is None else w["resetsAt"] + APPLE_EPOCH)
-                         for w in found]
+    weekly = next((w["resetsAt"] + APPLE_EPOCH for w in timed
+                   if w.get("windowMinutes") == 7 * 24 * 60 and w.get("resetsAt") is not None), None)
+    return (bool(timed), [(w.get("usedPercent") or 0, None if w.get("resetsAt") is None else w["resetsAt"] + APPLE_EPOCH)
+                          for w in found], weekly)
 
 
 def room(windows, now):
@@ -258,12 +268,40 @@ def wait(windows, now):
                 for used, reset in windows if used >= 100), default=0)
 
 
-def pick(homes, readings, now):
-    """Most room among time-window logins, then credit-only or unread ones, else the one that frees up first."""
-    for timed in (True, False):
-        usable = [h for h in homes if readings[h][0] == timed and room(readings[h][1], now) > 0]
-        if usable:
-            return max(usable, key=lambda h: room(readings[h][1], now))
+def claude_weight(home):
+    """How many Pro-sized windows the login's plan holds; an unknown or unreadable plan counts as one."""
+    path = f"{HOME}/.claude.json" if home == f"{HOME}/.claude" else f"{home}/.claude.json"
+    try:
+        with open(path) as file:
+            return TIERS.get((json.load(file).get("oauthAccount") or {}).get("organizationRateLimitTier"), 1)
+    except (OSError, ValueError, AttributeError):
+        return 1
+
+
+def expires(reading, now):
+    """When the login's weekly quota expires unused: its weekly reset, or its latest known reset for a saved
+    reading taken before readings recorded the weekly one. A saved weekly reset that has passed says nothing
+    about the new week, so that login comes last."""
+    timed, windows, weekly = reading
+    if weekly:
+        return weekly if weekly > now else float("inf")
+    return max((reset for used, reset in windows if reset and reset > now), default=float("inf"))
+
+
+def pick(homes, readings, weights, now):
+    """Among time-window logins with a comfortable reserve, the one whose weekly quota resets first, ties going
+    to the most room; then the most room in Pro-sized units; then credit-only or unread logins by room;
+    else the one that frees up first."""
+    usable = [h for h in homes if room(readings[h][1], now) > 0]
+    timed = [h for h in usable if readings[h][0]]
+    if timed:
+        weighted = lambda h: room(readings[h][1], now) * weights[h]
+        comfortable = [h for h in timed if weighted(h) >= RESERVE]
+        if comfortable:
+            return min(comfortable, key=lambda h: (expires(readings[h], now), -weighted(h)))
+        return max(timed, key=weighted)
+    if usable:
+        return max(usable, key=lambda h: room(readings[h][1], now))
     return min(homes, key=lambda h: wait(readings[h][1], now))
 
 
@@ -317,14 +355,16 @@ def main():
     if len(readings) < len(homes):
         saved = saved_readings(tool)
         # A login with no reading at all ranks with the credit-only ones.
-        readings = {home: readings.get(home) or saved.get(home, (0, (False, [])))[1] for home in homes}
-    home = pick(homes, readings, now)
+        readings = {home: readings.get(home) or saved.get(home, (0, (False, [], None)))[1] for home in homes}
+    weights = {home: tool["weight"](home) for home in homes}
+    home = pick(homes, readings, weights, now)
     name = os.path.basename(home).lstrip(".").capitalize()
     left = room(readings[home][1], now)
     # A saved reading can be stale, for example when an update changed how a login stores its credentials.
     saved_note = "" if live.get(home) else ", saved reading" if home in saved else ", no reading"
     if left > 0:
-        print(f"{command}: {name} ({left:.0f}% left{saved_note})", file=sys.stderr)
+        plan = f" of a {weights[home]}x plan" if weights[home] > 1 else ""
+        print(f"{command}: {name} ({left:.0f}% left{plan}{saved_note})", file=sys.stderr)
     else:
         frees = wait(readings[home][1], now)
         when = "at an unknown time" if frees == float("inf") else time.strftime("at %H:%M", time.localtime(now + frees))
@@ -337,6 +377,11 @@ def main():
         script = "claude-share-projects" if command == "cl" else "codex-share-home"
         print(f"{command}: shared history needs repair, run {script}: {problems[0]}"
               + (f" (+{len(problems) - 1} more)" if len(problems) > 1 else ""), file=sys.stderr)
+    if sys.argv[1:] == ["--which"]:
+        # For scripts: CLAUDE_CONFIG_DIR=$(cl --which) or CODEX_HOME=$(cdx --which). The unnamed ~/.claude
+        # prints an empty line, which Claude Code reads like an unset variable.
+        print("" if home == tool["unnamed"] else home)
+        return
     log_launch({"at": datetime.fromtimestamp(now).isoformat(timespec="seconds"), "tool": command, "picked": home,
                 "left": round(left), "live": sorted(h for h, reading in live.items() if reading), "problems": problems})
 

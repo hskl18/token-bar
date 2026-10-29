@@ -3,25 +3,35 @@ import Foundation
 struct ClaudeWindowSampler {
     private let readChunkBytes = 1024 * 1024
     private let lineParser = ClaudeMixSampler()
-    private let configDirectory: URL
-    /// The real folder behind `projects`, which several accounts may link to and share.
-    private let projectsDirectory: URL
-    /// Who keeps a record no `SessionStart` line names: the account folder that holds `projects`,
-    /// or this account when its `projects` links somewhere no account owns, such as another disk.
-    private let fallbackOwner: String
+    /// Every folder signed in to this login; one login can be signed in from several folders.
+    private let ownerDirectories: Set<String>
+    /// The login's `ClaudeAccountProfile.id`, which decides records whose `SessionStart` line names a login.
+    private let accountID: String?
+    /// The real folder behind each `projects`, which several accounts may link to and share, with who keeps
+    /// a record no `SessionStart` line names: the account folder that holds it, or this account when it
+    /// links somewhere no account owns, such as another disk.
+    private let projectsFolders: [(url: URL, fallbackOwner: String)]
     private let ledgerKey: String
 
-    init(configDirectory: URL? = nil) {
-        self.configDirectory = configDirectory ?? AccountSource.primaryDirectory(for: .claude)
-        projectsDirectory = self.configDirectory.appendingPathComponent("projects").resolvingSymlinksInPath()
-        let holder = projectsDirectory.deletingLastPathComponent().standardizedFileURL
-        let accounts = [AccountSource.primaryDirectory(for: .claude)]
-            + AccountSource.detected().filter { $0.provider == .claude }.map(\.url)
-        fallbackOwner = (accounts.contains { $0.resolvingSymlinksInPath().standardizedFileURL == holder }
-            ? holder : self.configDirectory.standardizedFileURL).path
-        ledgerKey = configDirectory.map {
-            StorageKeys.profileLedger(StorageKeys.claudeWindowLedger, directory: $0.path)
-        } ?? StorageKeys.claudeWindowLedger
+    init(configDirectory: URL? = nil, aliases: [URL] = [], accountID: String? = nil) {
+        let primary = AccountSource.primaryDirectory(for: .claude)
+        let directories = [configDirectory ?? primary] + aliases
+        ownerDirectories = Set(directories.map(\.standardizedFileURL.path))
+        self.accountID = accountID
+        let accounts = Set(([primary] + AccountSource.detected().filter { $0.provider == .claude }.map(\.url))
+            .map { $0.resolvingSymlinksInPath().standardizedFileURL.path })
+        var seen = Set<String>()
+        projectsFolders = directories.compactMap { directory in
+            let projects = directory.appendingPathComponent("projects").resolvingSymlinksInPath()
+            guard seen.insert(projects.path).inserted else { return nil }
+            let holder = projects.deletingLastPathComponent().standardizedFileURL.path
+            return (projects, accounts.contains(holder) ? holder : directory.standardizedFileURL.path)
+        }
+        ledgerKey = configDirectory == nil && aliases.isEmpty
+            ? StorageKeys.claudeWindowLedger
+            : StorageKeys.profileLedger(
+                StorageKeys.claudeWindowLedger, directory: directories.map(\.path).sorted().joined(separator: "\n")
+            )
     }
 
     func update(windowStartedAt: Date, resetsAt: Date) async throws -> ClaudeWindowLedger {
@@ -35,7 +45,8 @@ struct ClaudeWindowSampler {
         windowStartedAt: Date,
         resetsAt: Date
     ) throws -> ClaudeWindowLedger {
-        let files = sessionFiles(since: windowStartedAt)
+        let listed = sessionFiles(since: windowStartedAt)
+        let files = listed.map(\.file)
         let owners = ClaudeSessionOwners.load()
         let observedAt = Date()
         let activePaths = Set(files.map { $0.url.path })
@@ -58,7 +69,7 @@ struct ClaudeWindowSampler {
         ledger.observedAt = observedAt
         ledger.isComplete = false
 
-        for file in files {
+        for (file, ownsUnnamed) in listed {
             try Task.checkCancellation()
             let path = file.url.path
             let start = ledger.cursors[path] ?? 0
@@ -85,6 +96,7 @@ struct ClaudeWindowSampler {
                     data,
                     chunkOffset: chunkOffset,
                     path: path,
+                    ownsUnnamed: ownsUnnamed,
                     owners: owners,
                     ledger: &ledger,
                     pending: &pending,
@@ -101,20 +113,29 @@ struct ClaudeWindowSampler {
         return ledger
     }
 
-    private func sessionFiles(since windowStartedAt: Date) -> [TranscriptFile] {
-        TranscriptFile.list(in: [projectsDirectory], since: windowStartedAt)
+    /// Each transcript, and whether this login keeps its records that no `SessionStart` line names.
+    private func sessionFiles(since windowStartedAt: Date) -> [(file: TranscriptFile, ownsUnnamed: Bool)] {
+        projectsFolders.flatMap { folder in
+            TranscriptFile.list(in: [folder.url], since: windowStartedAt)
+                .map { ($0, ownerDirectories.contains(folder.fallbackOwner)) }
+        }
     }
 
-    /// A record belongs to the account its session last started under, else to `fallbackOwner`.
-    private func belongs(_ record: ClaudeUsageRecord, owners: ClaudeSessionOwners) -> Bool {
-        let owner = owners.owner(of: record.sessionID, at: record.date) ?? fallbackOwner
-        return owner == configDirectory.standardizedFileURL.path
+    /// A record belongs to the login its session last started under, else to the folder that keeps its file.
+    /// A line naming a login decides by login, so a login keeps its records when it moves to another folder
+    /// that shares `projects`; a line naming none, written signed out or before the hook recorded logins,
+    /// decides by folder.
+    private func belongs(_ record: ClaudeUsageRecord, ownsUnnamed: Bool, owners: ClaudeSessionOwners) -> Bool {
+        guard let start = owners.owner(of: record.sessionID, at: record.date) else { return ownsUnnamed }
+        if let account = start.account, !account.isEmpty { return account == accountID }
+        return ownerDirectories.contains(start.directory)
     }
 
     private func consumeChunk(
         _ data: Data,
         chunkOffset: UInt64,
         path: String,
+        ownsUnnamed: Bool,
         owners: ClaudeSessionOwners,
         ledger: inout ClaudeWindowLedger,
         pending: inout Data,
@@ -127,7 +148,7 @@ struct ClaudeWindowSampler {
                 pending.append(contentsOf: data[segmentStart..<index])
             }
             if !discardingLine, !pending.isEmpty {
-                parseLine(pending, path: path, owners: owners, ledger: &ledger)
+                parseLine(pending, path: path, ownsUnnamed: ownsUnnamed, owners: owners, ledger: &ledger)
             }
             pending.removeAll(keepingCapacity: true)
             discardingLine = false
@@ -148,6 +169,7 @@ struct ClaudeWindowSampler {
     private func parseLine(
         _ line: Data,
         path: String,
+        ownsUnnamed: Bool,
         owners: ClaudeSessionOwners,
         ledger: inout ClaudeWindowLedger
     ) {
@@ -164,7 +186,7 @@ struct ClaudeWindowSampler {
             return
         }
         guard record.date >= ledger.windowStartedAt, record.date <= ledger.observedAt,
-              belongs(record, owners: owners)
+              belongs(record, ownsUnnamed: ownsUnnamed, owners: owners)
         else {
             return
         }

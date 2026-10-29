@@ -6,7 +6,13 @@ import os
 struct ClaudeAccountProfile: Hashable, Sendable {
     let id: String
     let name: String
+    /// The folder whose credentials read this login's quota.
     let configDirectory: URL
+    /// Other folders signed in to the same login; their sessions count toward it too.
+    var aliases: [URL] = []
+
+    /// The login's `accountUuid:organizationUuid`; nil when the folder's configuration names none.
+    var accountID: String? { id == configDirectory.path ? nil : id }
 
     static var primaryAccountID: String? {
         accountID(in: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude.json"))
@@ -17,18 +23,28 @@ struct ClaudeAccountProfile: Hashable, Sendable {
         return accountID(in: profile.configDirectory.appendingPathComponent(".claude.json"))
     }
 
-    static func discover(in directories: [URL], primaryID: String?) -> [ClaudeAccountProfile] {
+    /// One profile per login, with later folders signed in to it as aliases;
+    /// `primaryAliases` are the folders signed in to the primary folder's login.
+    static func discover(
+        in directories: [URL], primaryID: String?
+    ) -> (profiles: [ClaudeAccountProfile], primaryAliases: [URL]) {
         let titles = AccountSource.titles(for: [AccountSource.primaryDirectory(for: .claude)] + directories)
-        var seen = Set<String>()
-        return directories.compactMap { directory in
-            guard AccountSource.isAllowedDirectory(directory) else { return nil }
+        var profiles: [ClaudeAccountProfile] = []
+        var primaryAliases: [URL] = []
+        for directory in directories where AccountSource.isAllowedDirectory(directory) {
             let id = accountID(in: directory.appendingPathComponent(".claude.json")) ?? directory.path
-            guard id != primaryID, seen.insert(id).inserted else { return nil }
-            return ClaudeAccountProfile(
-                id: id, name: titles[directory.path] ?? AccountSource.title(for: directory),
-                configDirectory: directory
-            )
+            if id == primaryID {
+                primaryAliases.append(directory)
+            } else if let index = profiles.firstIndex(where: { $0.id == id }) {
+                profiles[index].aliases.append(directory)
+            } else {
+                profiles.append(ClaudeAccountProfile(
+                    id: id, name: titles[directory.path] ?? AccountSource.title(for: directory),
+                    configDirectory: directory
+                ))
+            }
         }
+        return (profiles, primaryAliases)
     }
 
     var keychainService: String {

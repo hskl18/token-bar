@@ -1,7 +1,7 @@
 enum StorageKeys {
     static let snapshot = "tokenbar.snapshot.v1"
     static let claudeLedger = "tokenbar.claude-ledger.v6"
-    static let claudeWindowLedger = "tokenbar.claude-window-ledger.v6"
+    static let claudeWindowLedger = "tokenbar.claude-window-ledger.v7"
     static let codexUsageLedger = "tokenbar.codex-usage-ledger.v7"
     static let codexWindowLedger = "tokenbar.codex-window-ledger.v9"
     static let codexLastKnownMix = "tokenbar.codex-last-known-mix.v4"
