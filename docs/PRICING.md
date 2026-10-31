@@ -64,6 +64,8 @@ Each UTC day uses the larger of its reported account total and its deduplicated 
 This covers absent dates, gaps between reported dates, and a present bucket that is still incomplete.
 Reported and local totals are never added for the same day; the account total takes over when it catches up.
 Local totals remain provisional, can omit other devices, and retain the same UTC-day assignment as account buckets.
+Codex logins no longer signed in, such as a folder's login before it switched accounts, add the local records of usage ledgers no current login reads.
+Such a day counts only when it shares no message with a current ledger, so nothing is counted twice.
 Only dated transcript records supply this floor; lost-thread totals reconstructed from database update times affect the estimated price mix but cannot raise a daily account bucket.
 A Codex folder counts lost threads only when their `creator_account_id` is its own login or absent, so threads copied in from another account's folder stay with that account.
 Each token count in a session file records the serving login's `rate_limits`, so a count whose weekly reset matches a login's current weekly reset belongs to that login, even in a session another login created and this one resumed.
