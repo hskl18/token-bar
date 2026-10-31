@@ -366,8 +366,10 @@ final class TokenBarStore: ObservableObject {
                 let currentKeys = ([codexHome] + (snapshot.additionalCodexAccounts ?? []).map {
                     URL(fileURLWithPath: $0.sourceDirectory, isDirectory: true)
                 }).map { CodexMixSampler(codexHome: $0, additionalHomes: codexDirectories(for: $0).homes).ledgerKey }
+                let currentAccounts = Set(([snapshot.codexAccountID] + (snapshot.additionalCodexAccounts ?? []).map(\.accountID))
+                    .compactMap { $0 })
                 let retired = await Task.detached(priority: .utility) {
-                    CodexMixSampler.retiredMixLedger(excluding: currentKeys)
+                    CodexMixSampler.retiredMixLedger(excluding: currentKeys, currentAccounts: currentAccounts)
                 }.value
                 var retiredLedger = await catalog.costLedger(for: retired)
                 retiredLedger.recordedTokensByDay = retired.byDayAndModel.mapValues { $0.values.reduce(0) { $0 + $1.total } }

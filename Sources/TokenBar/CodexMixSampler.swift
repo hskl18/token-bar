@@ -138,12 +138,13 @@ struct CodexMixSampler {
 
     /// History in ledgers no current login reads, such as a login's before it switched accounts or linked folders.
     /// A day counts only when it shares no message with a current ledger or a retired day already counted.
-    static func retiredMixLedger(excluding currentKeys: [String]) -> MixLedger {
+    /// Ledgers of `currentAccounts` are skipped: those logins' account totals already count every day.
+    static func retiredMixLedger(excluding currentKeys: [String], currentAccounts: Set<String>) -> MixLedger {
         var counted = Set(currentKeys.compactMap { TranscriptCache.load(CodexUsageLedger.self, key: $0) }
             .flatMap { $0.messageHashesByDay.values.joined() })
         var result = MixLedger.empty
         let retired = TranscriptCache.loadAll(CodexUsageLedger.self, base: StorageKeys.codexUsageLedger, excluding: currentKeys)
-        for ledger in retired {
+        for ledger in retired where !currentAccounts.contains(ledger.accountID ?? "") {
             for (day, models) in ledger.byDayAndModel {
                 let hashes = ledger.messageHashesByDay[day] ?? []
                 guard counted.isDisjoint(with: hashes) else { continue }
@@ -239,8 +240,9 @@ struct CodexMixSampler {
         }
         if let saved = load(ledgerKey) { return saved }
         if let other = TranscriptCache.load(CodexUsageLedger.self, key: ledgerKey) {
-            // Set the departed login's history aside for totals; its last day keeps each stint's copy apart.
-            let retired = "\(ledgerKey) retired \(other.accountID ?? "unknown") \(other.byDayAndModel.keys.max() ?? "")"
+            // Set the departed login's history aside for totals; its message fingerprint keeps each stint's copy apart.
+            let fingerprint = other.messageHashesByDay.values.joined().reduce(UInt64(0), ^)
+            let retired = "\(ledgerKey) retired \(other.accountID ?? "unknown") \(fingerprint)"
             TranscriptCache.save(other, key: StorageKeys.profileLedger(StorageKeys.codexUsageLedger, directory: retired))
         }
         guard codexHomes.count > 1 else { return .empty }
