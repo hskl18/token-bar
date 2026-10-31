@@ -82,7 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         statusPanel?.onOpen = { [weak self] in self?.store.refreshIfStale() }
 
-        usageItem = makeStatusItem(toolTip: "Red: Claude · Blue: Codex · White: available")
+        usageItem = makeStatusItem()
 
         store.$snapshot
             .sink { [weak self] snapshot in
@@ -260,10 +260,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func makeStatusItem(toolTip: String) -> NSStatusItem {
+    // No tooltip: an auto-hiding menu bar can leave it stranded mid-screen after the bar hides.
+    private func makeStatusItem() -> NSStatusItem {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.menu = statusPanel?.menu
-        item.button?.toolTip = toolTip
         item.button?.imagePosition = .imageOnly
         return item
     }
