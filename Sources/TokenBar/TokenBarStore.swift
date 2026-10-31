@@ -362,6 +362,20 @@ final class TokenBarStore: ObservableObject {
                     }
                 }
             }
+            if !scannedGroups.isEmpty {
+                let currentKeys = ([codexHome] + (snapshot.additionalCodexAccounts ?? []).map {
+                    URL(fileURLWithPath: $0.sourceDirectory, isDirectory: true)
+                }).map { CodexMixSampler(codexHome: $0, additionalHomes: codexDirectories(for: $0).homes).ledgerKey }
+                let currentAccounts = Set(([snapshot.codexAccountID] + (snapshot.additionalCodexAccounts ?? []).map(\.accountID))
+                    .compactMap { $0 })
+                let retired = await Task.detached(priority: .utility) {
+                    CodexMixSampler.retiredMixLedger(excluding: currentKeys, currentAccounts: currentAccounts)
+                }.value
+                var retiredLedger = await catalog.costLedger(for: retired)
+                retiredLedger.recordedTokensByDay = retired.byDayAndModel.mapValues { $0.values.reduce(0) { $0 + $1.total } }
+                guard !Task.isCancelled, refreshGeneration == generation else { return }
+                snapshot.retiredCodexCostLedger = retiredLedger.byDay.isEmpty ? nil : retiredLedger
+            }
 
             var codexWindows: [String: Result<CodexWindowLedger, Error>] = [:]
             @MainActor func codexWindow(for directory: URL, quota: ProviderSnapshot) async -> Result<CodexWindowLedger, Error>? {
@@ -614,7 +628,8 @@ final class TokenBarStore: ObservableObject {
         return summary
     }
 
-    // Activity freshness is independent of quota freshness. Each login contributes one account total.
+    // Activity freshness is independent of quota freshness. Each login contributes one account total,
+    // and logins no longer signed in contribute their local history.
     private var codexUsage: [(activity: TokenActivity, ledger: CostLedger?)] {
         if let codexActivityCache { return codexActivityCache }
         let accounts = [(id: snapshot.codexAccountID ?? "primary", activity: snapshot.tokenActivity,
@@ -630,7 +645,7 @@ final class TokenBarStore: ObservableObject {
                 $0.overall.sampledTokens < $1.overall.sampledTokens
             }
             return (activity.supplementing(with: ledger), ledger)
-        }
+        } + [snapshot.retiredCodexCostLedger].compactMap { $0 }.map { (TokenActivity.empty.supplementing(with: $0), $0) }
         codexActivityCache = usage
         return usage
     }
@@ -789,6 +804,7 @@ final class TokenBarStore: ObservableObject {
             + " Dollars price each account's day with that UTC day's local model mix from its Codex folder."
             + " Each day uses the larger of the account total and this Mac's deduplicated records, never their sum."
             + " Local totals remain provisional while account reporting lags; other devices may be missing."
+            + " Logins no longer signed in add this Mac's records of days no current login recounts."
         let cost = activitySummary(for: .codex, period: period)
         if cost.unmatchedTokens > 0, cost.estimatedCost != nil {
             codexScope += " \(compactTokens(cost.unmatchedTokens)) tokens fall on days without local model records"

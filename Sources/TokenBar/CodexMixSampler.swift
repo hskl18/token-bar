@@ -4,7 +4,7 @@ struct CodexMixSampler {
     private let readChunkBytes = 1024 * 1024
     private let parser: CodexTranscriptParser
     private let codexHomes: [URL]
-    private let ledgerKey: String
+    let ledgerKey: String
 
     /// `weeklyResets` holds each Codex login's current weekly reset by account ID, which settles who used a count.
     init(codexHome: URL? = nil, additionalHomes: [URL] = [], accountID: String? = nil, weeklyResets: [String: Date] = [:]) {
@@ -136,6 +136,27 @@ struct CodexMixSampler {
         loadLedger().mixLedger
     }
 
+    /// History in ledgers no current login reads, such as a login's before it switched accounts or linked folders.
+    /// A day counts only when it shares no message with a current ledger or a retired day already counted.
+    /// Ledgers of `currentAccounts` are skipped: those logins' account totals already count every day.
+    static func retiredMixLedger(excluding currentKeys: [String], currentAccounts: Set<String>) -> MixLedger {
+        var counted = Set(currentKeys.compactMap { TranscriptCache.load(CodexUsageLedger.self, key: $0) }
+            .flatMap { $0.messageHashesByDay.values.joined() })
+        var result = MixLedger.empty
+        let retired = TranscriptCache.loadAll(CodexUsageLedger.self, base: StorageKeys.codexUsageLedger, excluding: currentKeys)
+        for ledger in retired where !currentAccounts.contains(ledger.accountID ?? "") {
+            for (day, models) in ledger.byDayAndModel {
+                let hashes = ledger.messageHashesByDay[day] ?? []
+                guard counted.isDisjoint(with: hashes) else { continue }
+                counted.formUnion(hashes)
+                for (model, tokens) in models {
+                    result.byDayAndModel[day, default: [:]][model, default: TokenBreakdown()].add(tokens)
+                }
+            }
+        }
+        return result
+    }
+
     private func sessionFiles(since cutoff: Date) -> [TranscriptFile] {
         // A linked `sessions` is read once, at its real path, so the parser can tell whose folder holds each file.
         TranscriptFile.list(in: Set(codexHomes.flatMap { home in
@@ -218,6 +239,12 @@ struct CodexMixSampler {
             TranscriptCache.load(CodexUsageLedger.self, key: key).flatMap { $0.accountID == parser.accountID ? $0 : nil }
         }
         if let saved = load(ledgerKey) { return saved }
+        if let other = TranscriptCache.load(CodexUsageLedger.self, key: ledgerKey) {
+            // Set the departed login's history aside for totals; its message fingerprint keeps each stint's copy apart.
+            let fingerprint = other.messageHashesByDay.values.joined().reduce(UInt64(0), ^)
+            let retired = "\(ledgerKey) retired \(other.accountID ?? "unknown") \(fingerprint)"
+            TranscriptCache.save(other, key: StorageKeys.profileLedger(StorageKeys.codexUsageLedger, directory: retired))
+        }
         guard codexHomes.count > 1 else { return .empty }
         return .seed(from: codexHomes.compactMap {
             load(StorageKeys.codexLedger(StorageKeys.codexUsageLedger, directories: [$0.path]))

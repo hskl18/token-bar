@@ -510,6 +510,8 @@ struct AppSnapshot: Codable, Hashable {
     var claudeCostMix: CostMix?
     var claudeCostLedger: CostLedger?
     var codexCostLedger: CostLedger?
+    // Local history of Codex logins no longer signed in, which only the period totals count.
+    var retiredCodexCostLedger: CostLedger? = nil
     var claudeWeeklyCapacity: WeeklyTokenCapacityEstimate?
     var codexWeeklyCapacity: WeeklyTokenCapacityEstimate?
     var claudeWeeklyCapacityHistory: WeeklyCapacityHistory?

@@ -19,6 +19,15 @@ enum TranscriptCache {
         (try? Data(contentsOf: url(for: key))).flatMap { try? JSONDecoder().decode(type, from: $0) }
     }
 
+    /// Every saved ledger of `base` and its profiles, except those saved under `keys`.
+    static func loadAll<T: Decodable>(_ type: T.Type, base: String, excluding keys: [String]) -> [T] {
+        let excluded = Set(keys.map { url(for: $0).lastPathComponent })
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        return files.filter { $0.lastPathComponent.hasPrefix(base + ".") && !excluded.contains($0.lastPathComponent) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .compactMap { (try? Data(contentsOf: $0)).flatMap { try? JSONDecoder().decode(type, from: $0) } }
+    }
+
     static func save<T: Encodable>(_ value: T, key: String) {
         guard let data = try? JSONEncoder().encode(value) else { return }
         let destination = url(for: key)
