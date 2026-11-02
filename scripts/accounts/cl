@@ -35,8 +35,6 @@ LOG = f"{HOME}/.cache/cl/launch.log"
 SHARED = {"cl": ["projects", "file-history", "paste-cache", "session-env"],
           "cdx": ["sessions", "archived_sessions", "thread-writer-locks", "history.jsonl", "session_index.jsonl",
                   ".tmp/rollout-maintenance.lock"]}
-# A login is comfortable with this much room in its tightest window, in percent of a Pro-sized window.
-RESERVE = 40
 # Pro-sized windows per Claude plan, from `organizationRateLimitTier`; estimates, since only the 5-hour ratio is published.
 TIERS = {"default_claude_max_5x": 5, "default_claude_max_20x": 20}
 UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -289,17 +287,13 @@ def expires(reading, now):
 
 
 def pick(homes, readings, weights, now):
-    """Among time-window logins with a comfortable reserve, the one whose weekly quota resets first, ties going
-    to the most room; then the most room in Pro-sized units; then credit-only or unread logins by room;
-    else the one that frees up first."""
+    """Among time-window logins with room left in every window, the one whose weekly quota resets first, ties
+    going to the most room in Pro-sized units; then credit-only or unread logins by room; else the one that
+    frees up first."""
     usable = [h for h in homes if room(readings[h][1], now) > 0]
     timed = [h for h in usable if readings[h][0]]
     if timed:
-        weighted = lambda h: room(readings[h][1], now) * weights[h]
-        comfortable = [h for h in timed if weighted(h) >= RESERVE]
-        if comfortable:
-            return min(comfortable, key=lambda h: (expires(readings[h], now), -weighted(h)))
-        return max(timed, key=weighted)
+        return min(timed, key=lambda h: (expires(readings[h], now), -room(readings[h][1], now) * weights[h]))
     if usable:
         return max(usable, key=lambda h: room(readings[h][1], now))
     return min(homes, key=lambda h: wait(readings[h][1], now))

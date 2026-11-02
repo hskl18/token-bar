@@ -126,9 +126,9 @@ cdx resume --last
 
 Both launchers read each login's quota live, from Claude's usage endpoint or from `codex app-server`, which usually takes about a second; a Codex cold start over a large shared history can take several seconds.
 They measure room in Pro-sized windows: a Claude Max 5x login counts five times its percentage and Max 20x twenty times, read from each login's `.claude.json`; these ratios are estimates, and Codex logins count once.
-Among logins with at least 40% of a Pro-sized window left in their tightest window, they pick the one whose weekly window resets first, so quota that would expire unused goes first; equal resets go to the one with the most room.
+Among logins with room left in both their 5-hour and weekly windows, they pick the one whose weekly window resets first, so quota that would expire unused goes first; equal resets go to the one with the most room.
+A login close to its limit can run out mid-session; with the shared history, the next launch can resume that session on another login.
 A saved reading from before launchers recorded the weekly reset uses its latest reset instead.
-When no login has that much, they pick the one with the most room.
 Credit-only logins, such as an Enterprise trial, come last.
 When every login is at a limit, they pick the one that frees up first.
 A login that cannot be read live uses the newer of its last live reading and Token Bar's.
