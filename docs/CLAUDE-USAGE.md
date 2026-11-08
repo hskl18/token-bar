@@ -22,16 +22,18 @@ Opening the menu does not bypass that cooldown.
 
 ## Credential recovery
 
-After HTTP 401, Token Bar rereads the account's credential in case Claude Code already renewed it.
-If the token is unchanged, it runs the installed `claude --safe-mode` in a background terminal, which renews OAuth without sending a prompt, and retries once.
-It stops the CLI after renewal or 15 seconds and tries at most once every five minutes per account.
+A credential whose saved expiry has passed counts as an expired sign-in without a request, since Anthropic answers repeated 401s with 429.
+After HTTP 401, Token Bar rereads the account's credential in case Claude Code already renewed it, and retries once with a changed token.
+Claude Code renews a sign-in whenever it runs, so an account with a 5-hour limit and Weekly usage below 100% (or a Weekly reset time that has passed) renews through its next [window start](#starting-5-hour-windows).
+An account without a 5-hour limit, such as a usage-credit Enterprise plan, gets no message: its row keeps the last reading as "Idle since <time>", without a warning, until Claude Code runs in its folder.
+When Anthropic rejects a refresh token, Claude Code empties the stored tokens, and Token Bar reports that account as signed out.
 HTTP 403 and 429 never start the CLI.
 Token Bar looks for `claude` on `PATH` and in `~/.local/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`, so Finder launches find common installations.
 
 ## Starting 5-hour windows
 
 A 5-hour window starts with its first request, so an idle window reports no current reset time.
-When a refresh finds an idle window and Weekly usage below 100%, Token Bar sends one minimal prompt through the installed CLI:
+When a refresh finds an idle window, or an expired sign-in on an account with a 5-hour window, and Weekly usage below 100% or past its reset time, Token Bar sends one minimal prompt through the installed CLI:
 
 ```sh
 claude -p hi --model haiku --effort low --settings '{"alwaysThinkingEnabled":false}' --safe-mode --strict-mcp-config --system-prompt 'Reply with one word.' --no-session-persistence --max-turns 1 --tools ''

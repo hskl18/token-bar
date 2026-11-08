@@ -23,7 +23,6 @@ enum PreviewScenario: String {
             )
             snapshot.claude = ProviderSnapshot(
                 connected: true,
-                plan: "Claude Code",
                 shortWindow: LimitWindow(
                     label: "5-hour window",
                     usedPercent: 46,
@@ -43,11 +42,6 @@ enum PreviewScenario: String {
             )
             snapshot.claudeTokenActivity = activity
             snapshot.claudeCostLedger = makeCostLedger(activity: activity, usdPerToken: 0.00000062)
-            snapshot.claudeWeeklyCapacity = WeeklyTokenCapacityEstimate(
-                usedPercent: 73,
-                observedTokens: 730_000_000,
-                equivalentTokens: 1_000_000_000
-            )
             snapshot.claudeWeeklyValue = WeeklyValueEstimate(
                 usedPercent: 73,
                 observedTokens: 730_000_000,
@@ -64,7 +58,6 @@ enum PreviewScenario: String {
             )
             snapshot.codex = ProviderSnapshot(
                 connected: true,
-                plan: "pro",
                 shortWindow: nil,
                 longWindow: LimitWindow(
                     label: "7-day window",
@@ -95,7 +88,6 @@ enum PreviewScenario: String {
         }
 
         if self == .codexPlus || self == .bothPlus {
-            snapshot.codex.plan = "plus"
             snapshot.codex.shortWindow = LimitWindow(
                 label: "5-hour window", usedPercent: 62, windowMinutes: 300,
                 resetsAt: now.addingTimeInterval(2.5 * 60 * 60), limitID: "codex"
@@ -109,7 +101,6 @@ enum PreviewScenario: String {
                 sourceDirectory: "~/.claude-work",
                 quota: ProviderSnapshot(
                     connected: true,
-                    plan: "Claude Code",
                     shortWindow: LimitWindow(
                         label: "5-hour window", usedPercent: 18, windowMinutes: 300,
                         resetsAt: now.addingTimeInterval(3.6 * 60 * 60)
@@ -138,7 +129,6 @@ enum PreviewScenario: String {
                 accountID: "preview-codex-work",
                 quota: ProviderSnapshot(
                     connected: true,
-                    plan: "plus",
                     shortWindow: LimitWindow(
                         label: "5-hour window", usedPercent: 27, windowMinutes: 300,
                         resetsAt: now.addingTimeInterval(1.4 * 60 * 60), limitID: "codex"

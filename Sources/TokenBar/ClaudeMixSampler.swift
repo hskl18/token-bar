@@ -92,7 +92,7 @@ struct ClaudeMixSampler {
             .map { URL(fileURLWithPath: $0, isDirectory: true) }).map { ($0.url, $0.size) }
     }
 
-    private func parseLines(
+    func parseLines(
         _ data: Data,
         ledger: inout ClaudeUsageLedger,
         settled: Set<UInt64>,

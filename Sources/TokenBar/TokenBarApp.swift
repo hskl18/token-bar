@@ -64,7 +64,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Keyed by configuration directory, so each account refreshes on its own activity.
     private var pendingLocalAccounts: Set<String> = []
     private var lastLocalScanAt: [String: Date] = [:]
-    private let localScanInterval: TimeInterval = 3 * 60
+    // Quota moves slowly; opening the menu still reads anything older than the store's freshness limit.
+    private let localScanInterval: TimeInterval = 10 * 60
     private var cancellables: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -86,7 +87,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         store.$snapshot
             .sink { [weak self] snapshot in
-                self?.updateStatusItems()
+                // The publisher fires before the store holds the new value, so draw from the value it sends.
+                self?.updateStatusItems(snapshot)
                 self?.statusPanel?.updateContentSize(
                     TokenBarLayout.panelSize(for: snapshot)
                 )
@@ -101,25 +103,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in self?.store.refreshIfStale() }
             .store(in: &cancellables)
 
-        updateStatusItems()
+        updateStatusItems(store.snapshot)
         store.start()
 
         if PreviewScenario.current() == nil {
-            activityWatcher = LocalActivityWatcher { [weak self] accounts in
-                self?.localActivityChanged(accounts)
-            }
+            activityWatcher = LocalActivityWatcher(
+                onChange: { [weak self] accounts in self?.localActivityChanged(accounts) },
+                claimant: { [weak self] path, provider in self?.store.activityOwner(of: path, provider: provider) }
+            )
+            // Account folders change with the snapshot's account rows.
             store.$snapshot
-                .map { snapshot in
-                    (snapshot.additionalClaudeAccounts ?? []).map {
-                        AccountSource(provider: .claude, directory: $0.sourceDirectory)
-                    } + (snapshot.additionalCodexAccounts ?? []).map {
-                        AccountSource(provider: .codex, directory: $0.sourceDirectory)
-                    }
-                }
+                .map { [weak self] _ in self?.store.activitySources ?? [:] }
                 .removeDuplicates()
-                .sink { [weak self] accounts in
+                .sink { [weak self] sources in
                     guard let self, let watcher = activityWatcher else { return }
-                    watcher.start(accounts: accounts)
+                    watcher.start(sources: sources)
                     // A forgotten account's activity would otherwise be retried forever.
                     pendingLocalAccounts.formIntersection(watcher.watchedAccounts)
                 }
@@ -192,7 +190,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func runLocalRefresh() {
         localRefreshTimer = nil
         guard !pendingLocalAccounts.isEmpty else { return }
-        guard !store.isRefreshing else {
+        // A refresh or a reset in progress would reject this one.
+        guard !store.isRefreshing, !store.isResettingQuota else {
             scheduleLocalRefresh(after: 5)
             return
         }
@@ -249,15 +248,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func runClaudeWindowRefresh() {
         claudeWindowTimer = nil
-        guard !store.isRefreshing else {
+        guard !store.isRefreshing, !store.isResettingQuota else {
             scheduleClaudeWindowRefresh(at: Date().addingTimeInterval(5))
             return
         }
-        // A rate-limit cooldown skips Claude, so retry once it ends.
-        if !store.refresh(providers: [.claude]).contains(AccountSource.primaryDirectory(for: .claude).path),
-           let retry = store.snapshot.claude.nextAllowedRefreshAt, retry > Date() {
+        let now = Date()
+        let accounts = [(AccountSource.primaryDirectory(for: .claude).path, store.snapshot.claude)]
+            + (store.snapshot.additionalClaudeAccounts ?? []).map { ($0.sourceDirectory, $0.quota) }
+        // Only accounts whose 5-hour window has reset need a reading.
+        let due = accounts.filter { $0.1.shortWindow?.resetsAt.map { $0.addingTimeInterval(60) <= now } == true }
+        let attempted = store.refresh(providers: [.claude], accounts: Set(due.map(\.0)))
+        // A rate-limit cooldown skips an account, so retry once it ends.
+        if let retry = due.filter({ !attempted.contains($0.0) })
+            .compactMap({ $0.1.nextAllowedRefreshAt }).filter({ $0 > now }).min() {
             scheduleClaudeWindowRefresh(at: retry)
         }
+        // A refresh that sends no snapshot leaves no one else to schedule the next account's reset.
+        scheduleNextClaudeWindowRefresh(for: store.snapshot)
     }
 
     // No tooltip: an auto-hiding menu bar can leave it stranded mid-screen after the bar hides.
@@ -268,11 +275,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
-    private func updateStatusItems() {
-        let snapshot = store.snapshot
+    private func updateStatusItems(_ snapshot: AppSnapshot) {
         let claudePercent = averagePercent(snapshot.accountRows(for: .claude).map(\.quota))
         let codexPercent = averagePercent(snapshot.accountRows(for: .codex).map(\.quota))
-        switch store.snapshot.presentation {
+        switch snapshot.presentation {
         case .claudeOnly:
             usageItem?.button?.image = singleGaugeImage(percent: claudePercent, color: QuotaBarColor.claude)
             usageItem?.button?.setAccessibilityLabel(
@@ -471,6 +477,7 @@ private final class StatusPanelController: NSObject, NSMenuDelegate {
 
     func menuDidClose(_ menu: NSMenu) {
         isShown = false
+        HoverTip.shared.hide()
     }
 
     func updateContentSize(_ size: NSSize) {

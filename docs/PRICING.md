@@ -81,6 +81,7 @@ While no connection holds that database's `-shm` file, a read-only open of the W
 Its `tokens_used`, less the cumulative total the last scan of that session read, is split like the same model's local token categories.
 A spawned subagent thread lost before any scan is skipped, because its total starts with its parent's.
 Days without a usable local mix use the period's average rate.
+Each period prices on its own, so the months in a Month or Year tooltip need not add up to the Year card, and a month can show `--` while the year has an amount.
 An account with no local mix in the period uses the other accounts' combined rate, and the app hides dollars when no account has one.
 
 ## Weekly capacity
@@ -121,7 +122,7 @@ The local fallback requires an exact token match between the ledger and its pric
 
 ## ImageGen output estimates
 
-Token Bar estimates saved PNG outputs under `~/.codex/generated_images`.
+Token Bar estimates saved PNG outputs under `generated_images` in every Codex folder, counting an image copied between folders once.
 It assumes GPT Image 2 medium quality, using saved dimensions and file time as proxies for request size and time.
 The [official calculator](https://developers.openai.com/api/docs/guides/image-generation#cost-and-latency) supplies the output-token formula; the bundled rate is [$30 per million output tokens](https://developers.openai.com/api/docs/models/gpt-image-2).
 See [the implementation](../Sources/TokenBar/ImageGenerationUsage.swift) for the calculation.
@@ -131,11 +132,12 @@ period cost = original estimate + image output estimate
 weekly value = original estimate + image window cost × 100 / weekly percent
 ```
 
+Period costs count images from every Codex folder, while the weekly value extrapolates only images saved in the primary login's folders, the only images its weekly percentage covers.
 Image estimates add dollars without changing displayed token counts, quota percentages or history smoothing.
 Each generation ID counts once; cached records survive removal of the source PNG.
 The estimate excludes prompt/reference inputs, partial-image charges and missing outputs, including other hosts.
 Account summaries do not establish whether the image addition overlaps the account token estimate.
-Hover over an amount to see the image estimate and assumptions.
+Hover over a Codex activity card to see its image cost.
 
 ## Combined percentage
 

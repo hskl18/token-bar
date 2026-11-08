@@ -25,6 +25,10 @@ Quota rows are titled by account folder, such as `Claude-work · Weekly`, and sh
 All 5-hour rows come first, then all Weekly rows, keeping account order within each group.
 Provider headers weight each listed account's Weekly percentage by its estimated weekly tokens.
 Hovering over a yellow footer time lists each account's errors once.
+Hovering over WEEKLY lists each account's weekly percentage, reset, spend so far and full-week projection, or "no projection" with the reason when it is known.
+Hovering over an activity card splits it by Codex login, or by provider under All when both have usage, and Month and Year add this year's totals by month once there are two.
+Hover text gives numbers and errors only; a card with nothing to add shows none, and the method stays in [pricing](PRICING.md).
+Claude history counts every Claude folder together, so Claude cards do not split by account.
 
 The menu bar gauge uses rounded arcs, a transparent background, and the same 35-degree rotation as the app mark.
 In the split gauge, Claude fills from the upper left toward the lower right, while Codex fills from the lower right toward the upper left.
