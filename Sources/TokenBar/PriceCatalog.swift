@@ -4,7 +4,7 @@ final class PriceCatalog {
     private enum SourceKind: String {
         case openAI = "OpenAI"
         case claude = "Claude"
-        case fallback = "Fallback"
+        case fallback = "Backup (LiteLLM)"
     }
 
     private let maxAge: TimeInterval = 24 * 60 * 60
@@ -214,7 +214,7 @@ final class PriceCatalog {
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
-                return recordAttempt(existing, error: "Unrecognized response; using saved rates.")
+                return recordAttempt(existing, error: "The price page sent an unrecognized response; saved rates stay in use.")
             }
             if http.statusCode == 304 {
                 var updated = existing
@@ -226,11 +226,14 @@ final class PriceCatalog {
                 return updated
             }
             guard (200..<300).contains(http.statusCode) else {
-                return recordAttempt(existing, error: "HTTP \(http.statusCode); using saved rates.")
+                return recordAttempt(existing, error: "The price page returned HTTP \(http.statusCode); saved rates stay in use.")
             }
+            // The backup list lacking a model is an answer, not a failure: that model stays unpriced.
             guard let models = parsedModels(data, kind: kind, requiredModels: requiredModels),
-                  !models.isEmpty else {
-                return recordAttempt(existing, error: "Price table could not be read; using saved rates.")
+                  !models.isEmpty || kind == .fallback else {
+                return recordAttempt(existing, error: kind == .fallback
+                    ? "The price list could not be read; saved rates stay in use."
+                    : "The price page changed its format; saved rates stay in use.")
             }
 
             return PriceSourceCache(
@@ -245,7 +248,7 @@ final class PriceCatalog {
                 lastAttemptAt: Date()
             )
         } catch {
-            return recordAttempt(existing, error: "Refresh failed; using saved rates.")
+            return recordAttempt(existing, error: "The price page could not be reached; saved rates stay in use.")
         }
     }
 

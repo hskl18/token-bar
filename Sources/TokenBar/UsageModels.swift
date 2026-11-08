@@ -73,7 +73,6 @@ struct LimitWindow: Codable, Hashable, Identifiable {
 
 struct ProviderSnapshot: Codable, Hashable {
     var connected: Bool
-    var plan: String?
     var shortWindow: LimitWindow?
     var longWindow: LimitWindow?
     var extraWindows: [LimitWindow]
@@ -86,10 +85,11 @@ struct ProviderSnapshot: Codable, Hashable {
     var weeklyResetCredits: Int? = nil
     var resetCreditsFetched: Bool? = nil
     var resetAccountID: String? = nil
+    /// An expired sign-in on an account Token Bar never renews: its last reading stands, without a warning.
+    var idle: Bool? = nil
 
     static let empty = ProviderSnapshot(
         connected: false,
-        plan: nil,
         shortWindow: nil,
         longWindow: nil,
         extraWindows: [],
@@ -505,14 +505,11 @@ struct AppSnapshot: Codable, Hashable {
     var additionalCodexAccounts: [CodexAccountSnapshot]? = nil
     var codexAccountID: String? = nil
     var tokenActivity: TokenActivity
-    var costMix: CostMix
     var claudeTokenActivity: TokenActivity?
-    var claudeCostMix: CostMix?
     var claudeCostLedger: CostLedger?
     var codexCostLedger: CostLedger?
     // Local history of Codex logins no longer signed in, which only the period totals count.
     var retiredCodexCostLedger: CostLedger? = nil
-    var claudeWeeklyCapacity: WeeklyTokenCapacityEstimate?
     var codexWeeklyCapacity: WeeklyTokenCapacityEstimate?
     var claudeWeeklyCapacityHistory: WeeklyCapacityHistory?
     var claudeWeeklyValue: WeeklyValueEstimate?
@@ -532,12 +529,9 @@ struct AppSnapshot: Codable, Hashable {
         claude: .empty,
         codex: .empty,
         tokenActivity: .empty,
-        costMix: .empty,
         claudeTokenActivity: nil,
-        claudeCostMix: nil,
         claudeCostLedger: nil,
         codexCostLedger: nil,
-        claudeWeeklyCapacity: nil,
         codexWeeklyCapacity: nil,
         claudeWeeklyCapacityHistory: nil,
         claudeWeeklyValue: nil,

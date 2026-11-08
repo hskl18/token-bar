@@ -146,8 +146,11 @@ private struct UnifiedUsagePage: View {
                 let provider = detail.map { title + " · " + $0 } ?? title
                 items.append(NamedWindow(
                     provider: provider, scope: name, source: source, window: window, barBase: color,
-                    status: nil,
-                    weeklyResetCredits: !quota.isStale && quota.resetCreditsFetched == true ? quota.weeklyResetCredits : nil
+                    // Past its reset an idle reading is out of date, so the row says "Reset due" like any other.
+                    status: quota.idle == true && window.resetsAt.map({ $0 > Date() }) ?? true
+                        ? quota.lastSuccessAt.map { "Idle since \(readingTime($0))" } : nil,
+                    weeklyResetCredits: !quota.isStale && quota.idle != true && quota.resetCreditsFetched == true
+                        ? quota.weeklyResetCredits : nil
                 ))
             }
             if groupedWindows.isEmpty && showUnavailable {
@@ -291,7 +294,7 @@ private struct UsageActivityGroup: View {
                         .foregroundStyle(Palette.secondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
-                        .help(store.weeklyCostHelp(for: provider))
+                        .hoverHelp(store.weeklyCostHelp(for: provider))
                 }
                 Spacer()
                 percentStatus
@@ -317,8 +320,7 @@ private struct UsageActivityGroup: View {
                 percentText
             }
             .contentShape(Rectangle())
-            .help(staleHelp)
-            .accessibilityHint(staleHelp)
+            .hoverHelp(staleHelp)
         } else {
             percentText
         }
@@ -332,20 +334,7 @@ private struct UsageActivityGroup: View {
     }
 
     private var staleHelp: String {
-        switch provider {
-        case .claude:
-            return store.staleError(.claude) ?? "Showing the last successful Claude reading."
-        case .codex:
-            return store.staleError(.codex) ?? "Showing the last successful Codex reading."
-        case .overview:
-            let staleProviders: [(name: String, error: String?)] = [ProviderScope.claude, .codex]
-                .filter { store.isStale($0) }
-                .map { ($0.title, store.staleError($0)) }
-            let names = staleProviders.map(\.name).joined(separator: " and ")
-            let details = staleProviders.compactMap(\.error).joined(separator: " ")
-            let summary = "All includes stale \(names) data."
-            return details.isEmpty ? summary : "\(summary) \(details)"
-        }
+        (provider == .overview ? [.claude, .codex] : [provider]).compactMap(store.staleDetails).joined(separator: "\n")
     }
 }
 
@@ -399,13 +388,13 @@ private struct WindowRow: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(!resetEnabled)
-                    .help("Use one of this account's \(weeklyResetCredits) weekly reset credits, after confirmation.")
+                    .hoverHelp("Use 1 of \(weeklyResetCredits) weekly reset credits")
                 }
             }
             .font(.system(size: TokenBarType.secondary, weight: .medium))
             .foregroundStyle(Palette.secondary)
         }
-        .help("\(name). Source: \(source). " + (status ?? "Percentage used for this account and window."))
+        .hoverHelp(source)
     }
 }
 
@@ -442,7 +431,7 @@ private struct ActivitySection: View {
             tokens: tokens,
             estimatedCost: store.estimatedCost(for: provider, period: period)
         )
-        .help(store.imageCostHelp(for: provider, period: period))
+        .hoverHelp(store.activityHelp(for: provider, period: period))
     }
 }
 
@@ -460,19 +449,19 @@ private struct CombinedActivitySection: View {
                 tokens: today.tokens,
                 estimatedCost: today.estimatedCost
             )
-            .help(store.imageCostHelp(for: .overview, period: .today))
+            .hoverHelp(store.activityHelp(for: .overview, period: .today))
             ActivityTile(
                 label: "THIS WEEK",
                 tokens: week.tokens,
                 estimatedCost: week.estimatedCost
             )
-            .help(store.imageCostHelp(for: .overview, period: .week))
+            .hoverHelp(store.activityHelp(for: .overview, period: .week))
             ActivityTile(
                 label: "THIS MONTH",
                 tokens: month.tokens,
                 estimatedCost: month.estimatedCost
             )
-            .help(store.imageCostHelp(for: .overview, period: .month))
+            .hoverHelp(store.activityHelp(for: .overview, period: .month))
         }
     }
 
@@ -551,7 +540,7 @@ private struct FooterBar: View {
                 footerIcon(store.isRefreshing ? "xmark" : "arrow.clockwise")
             }
             .buttonStyle(.plain)
-            .help("Auto-refreshes about every 30 minutes. Click to refresh now.")
+            .hoverHelp(store.isRefreshing ? "Cancel refresh" : "Refresh now")
             .accessibilityLabel(store.isRefreshing ? "Cancel refresh" : "Refresh now")
 
             Spacer()
@@ -560,8 +549,7 @@ private struct FooterBar: View {
                 Text(updatedText(at: context.date))
                     .font(.system(size: TokenBarType.secondary, weight: .medium))
                     .foregroundStyle(errors.isEmpty ? Palette.secondary : Palette.failure)
-                    .help(errors.isEmpty ? "Last successful update." : errors)
-                    .accessibilityHint(errors)
+                    .hoverHelp(errors)
             }
 
             Button {
@@ -570,7 +558,7 @@ private struct FooterBar: View {
                 footerIcon("power")
             }
             .buttonStyle(.plain)
-            .help("Quit Token Bar")
+            .hoverHelp("Quit Token Bar")
             .accessibilityLabel("Quit Token Bar")
         }
         .padding(.horizontal, AppleGeometry.pageInset)
@@ -779,4 +767,159 @@ private func compactTokens(_ value: Double) -> String {
         return sign + String(format: "%.1fK", absolute / 1_000)
     }
     return sign + String(format: "%.0f", absolute)
+}
+
+extension View {
+    /// Hover text for the status menu, where AppKit never shows `.help` tooltips during menu tracking.
+    func hoverHelp(_ text: String) -> some View {
+        overlay(HoverTracker(text: text)).accessibilityHint(text)
+    }
+}
+
+private struct HoverTracker: NSViewRepresentable {
+    let text: String
+
+    func makeNSView(context: Context) -> HoverTrackingView { HoverTrackingView() }
+
+    func updateNSView(_ view: HoverTrackingView, context: Context) { view.text = text }
+}
+
+private final class HoverTrackingView: NSView {
+    // A refresh can change the text under a still pointer, so the shown tip follows it.
+    var text = "" { didSet { if isInside, text != oldValue { report() } } }
+    private var isInside = false
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        // The menu window is never key, so only an always-active area hears the pointer, also while dragging.
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect, .enabledDuringMouseDrag],
+            owner: self
+        ))
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    // Clicks and scrolling reach the SwiftUI views beneath; tracking areas do not need hit testing.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func mouseEntered(with event: NSEvent) {
+        isInside = true
+        report()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isInside = false
+        HoverTip.shared.exit(self)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            isInside = false
+            HoverTip.shared.exit(self)
+        }
+    }
+
+    private func report() {
+        guard let window, !text.isEmpty else { return HoverTip.shared.exit(self) }
+        HoverTip.shared.enter(self, text: text, rect: window.convertToScreen(convert(bounds, to: nil)), menu: window.frame)
+    }
+}
+
+/// A tooltip window above the open status menu, placed beside it so it never covers the panel.
+@MainActor
+final class HoverTip {
+    static let shared = HoverTip()
+    private let panel: NSPanel
+    private let label = NSTextField(wrappingLabelWithString: "")
+    private var timer: Timer?
+    // Areas the pointer is inside. Enter and exit events arrive in any order, so the smallest area, the
+    // innermost, wins, and leaving a button inside a row returns to the row's text.
+    private var entered: [(owner: ObjectIdentifier, text: String, rect: NSRect, menu: NSRect)] = []
+
+    private init() {
+        panel = NSPanel(
+            contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true
+        )
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.ignoresMouseEvents = true
+        let background = NSVisualEffectView()
+        background.material = .toolTip
+        background.state = .active
+        background.wantsLayer = true
+        background.layer?.cornerRadius = 6
+        background.layer?.masksToBounds = true
+        label.font = .toolTipsFont(ofSize: 0)
+        label.textColor = .labelColor
+        label.isSelectable = false
+        label.cell?.truncatesLastVisibleLine = true
+        label.translatesAutoresizingMaskIntoConstraints = false
+        background.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: 8),
+            label.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -8),
+            label.topAnchor.constraint(equalTo: background.topAnchor, constant: 6),
+            label.bottomAnchor.constraint(equalTo: background.bottomAnchor, constant: -6),
+        ])
+        panel.contentView = background
+    }
+
+    func enter(_ owner: NSView, text: String, rect: NSRect, menu: NSRect) {
+        let id = ObjectIdentifier(owner)
+        entered.removeAll { $0.owner == id }
+        entered.append((id, text, rect, menu))
+        schedule()
+    }
+
+    func exit(_ owner: NSView) {
+        let id = ObjectIdentifier(owner)
+        guard entered.contains(where: { $0.owner == id }) else { return }
+        entered.removeAll { $0.owner == id }
+        panel.orderOut(nil)
+        schedule()
+    }
+
+    func hide() {
+        entered.removeAll()
+        timer?.invalidate()
+        timer = nil
+        panel.orderOut(nil)
+    }
+
+    private func schedule() {
+        timer?.invalidate()
+        guard !entered.isEmpty else { return }
+        // A run-loop timer in common modes fires during menu tracking, even when a main-queue task opened the
+        // menu and the queue cannot run again until it closes.
+        let timer = Timer(timeInterval: 0.35, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.present() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    private func present() {
+        guard let tip = entered.min(by: { $0.rect.width * $0.rect.height < $1.rect.width * $1.rect.height })
+        else { return }
+        let screen = (NSScreen.screens.first { $0.frame.intersects(tip.menu) } ?? NSScreen.main)?.visibleFrame ?? tip.menu
+        // The wider side of the menu, which sits under the menu bar; it overlaps the menu only when neither fits.
+        let left = tip.menu.minX - screen.minX - 12
+        let right = screen.maxX - tip.menu.maxX - 12
+        let width = min(340, max(160, max(left, right)) - 16)
+        label.stringValue = tip.text
+        label.preferredMaxLayoutWidth = width
+        let fitting = label.intrinsicContentSize
+        let size = NSSize(width: min(width, fitting.width) + 16, height: min(fitting.height + 12, screen.height - 12))
+        var x = left >= right ? tip.menu.minX - size.width - 6 : tip.menu.maxX + 6
+        x = min(max(x, screen.minX + 6), screen.maxX - size.width - 6)
+        let y = min(max(tip.rect.maxY - size.height, screen.minY + 6), screen.maxY - size.height - 6)
+        panel.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
+        panel.orderFrontRegardless()
+    }
 }

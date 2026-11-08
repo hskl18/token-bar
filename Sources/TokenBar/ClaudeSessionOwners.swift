@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// The config folder and login each Claude session started under, from a `SessionStart` hook that appends
 /// `{"sessionId", "configDir", "account", "at"}` lines to `~/.claude/account-sessions.jsonl`.
@@ -13,12 +14,19 @@ struct ClaudeSessionOwners {
     }
 
     private var starts: [String: [Start]] = [:]
+    private static let parsed = OSAllocatedUnfairLock<(version: String, owners: ClaudeSessionOwners)?>(uncheckedState: nil)
 
     static func load(
         from file: URL = AccountSource.primaryDirectory(for: .claude).appendingPathComponent("account-sessions.jsonl")
     ) -> ClaudeSessionOwners {
+        guard AccountSource.isRegularFile(file),
+              let values = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        else { return ClaudeSessionOwners() }
+        // The hook only appends, so a file of the same size and date still parses to the same starts.
+        let version = "\(file.path):\(values.fileSize ?? 0):\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+        if let cached = parsed.withLockUnchecked({ $0 }), cached.version == version { return cached.owners }
         var owners = ClaudeSessionOwners()
-        guard AccountSource.isRegularFile(file), let data = try? Data(contentsOf: file) else { return owners }
+        guard let data = try? Data(contentsOf: file) else { return owners }
         let formatter = ISO8601DateFormatter()
         for line in data.split(separator: 0x0A) {
             guard let row = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
@@ -31,6 +39,7 @@ struct ClaudeSessionOwners {
                 account: row["account"] as? String
             ))
         }
+        parsed.withLockUnchecked { $0 = (version, owners) }
         return owners
     }
 

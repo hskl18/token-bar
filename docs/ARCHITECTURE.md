@@ -47,6 +47,8 @@ Accounts can also share one history through linked folders; see [Shared accounts
 The presentation layer derives one of four states from displayable provider data: none, Claude-only, Codex-only, or both.
 Any account of a provider counts, so a provider whose only signed-in login is an extra folder still shows its activity, header, and All.
 A header and All are marked stale when any account whose percentage they include is stale.
+Hovering the marker lists each stale account with its error and the time of the reading shown.
+An idle account, one without a 5-hour window whose sign-in expired, is not stale: its row says "Idle since <time>".
 Only the dual-provider state renders All, and each state has its own compact panel height.
 Both providers show every returned quota window, and the panel grows for extra rows until it reaches 85% of the screen height, after which the quota area scrolls.
 The UI lists 5-hour rows, then Weekly rows, then any others, keeping account order and the main Codex bucket first.
@@ -56,10 +58,13 @@ Provider headers and All weight each account's weekly percentage by its estimate
 
 The status item owns a native `NSMenu` containing the SwiftUI view.
 AppKit handles menu tracking and dismissal, and the app refreshes stale data when the menu opens.
+AppKit shows no tooltips while a menu tracks, so hover text appears in a small window beside the open menu.
 Opening the menu does not synchronously read Keychain; a stale Claude credential may be read by the background refresh.
-FSEvents watches every account's session directories plus saved Codex images.
-Relevant changes are coalesced for 20 seconds, and event-triggered refreshes run at most once per account every three minutes.
-Only the changed account is refreshed; account requests retain the three-minute freshness limit and Claude rate-limit cooldown.
+FSEvents watches the session directories of every account folder, including extra folders signed in to the same login, plus saved Codex images.
+Relevant changes are coalesced for 20 seconds, and event-triggered refreshes run at most once per account every ten minutes.
+Only the changed account is refreshed; account requests retain the five-minute freshness limit and Claude rate-limit cooldown.
+In a folder several accounts share, a Claude change belongs to the login its session last started under in `~/.claude/account-sessions.jsonl`, and a Codex change to the login whose weekly reset the rollout's latest token count records; a change neither names refreshes every account sharing the folder.
+The Claude usage endpoint throttles for up to an hour and shares its budget with Claude Code's own `/usage`, so automatic requests stay at most one per account every five minutes, except the reading a minute after a 5-hour reset and the one after starting an idle window.
 A 30-minute background refresh covers quota resets, remote devices, and missed file events; the refresh button remains immediate.
 The root SwiftUI view leaves the outer background to the native menu to avoid stacked glass borders.
 The quota card stays outside the scroll view so scrolling moves the rows without moving its concentric background.
@@ -76,7 +81,8 @@ A linked `projects` folder is read once at its real path, and `ClaudeSessionOwne
 `CodexTranscriptParser` owns Codex schema interpretation, token delta normalization, model context, stable identity, and fork/subagent copied-history suppression.
 `CodexWindowSampler` uses it for the current official weekly interval.
 `CodexMixSampler` uses it for the available calendar year.
-Both Codex samplers scan `sessions` and `archived_sessions`, and pricing keys record each request's speed tier and long-context use.
+Both Codex samplers scan plain `.jsonl` rollouts in `sessions` and `archived_sessions`; compressed `.jsonl.zst` archives are skipped, so their usage stays as already counted.
+Pricing keys record each request's speed tier and long-context use.
 `CodexThreadTable` adds threads whose rollout files are gone to both samplers' results, less the cumulative total each session's last scan read.
 A linked `sessions` folder is read once at its real path, each token count goes to the login whose current weekly reset it records, and the thread table follows a top-level `sqlite_home`.
 
@@ -97,7 +103,7 @@ The affected dollar value remains available only when known prices cover at leas
 - Local calendar scans and current-window scans keep separate persisted cursors.
 - Network and parse failures preserve prior successful snapshots.
 - Cancelling a refresh terminates its Codex app-server child and skips the remaining runtimes; spending a reset credit cannot be cancelled.
-- Claude HTTP 401 can trigger one CLI renewal before reporting failure; see [credential recovery](CLAUDE-USAGE.md#credential-recovery).
+- Claude HTTP 401 rereads the credential once, and an account with a 5-hour limit renews through its next window start; see [credential recovery](CLAUDE-USAGE.md#credential-recovery).
 - Fetch and local-scan failures turn the footer time yellow, with details in its tooltip.
 - Price refresh failure preserves the last-known-good catalog.
 - Cached structures add new fields as optional values or move to a new storage key when counting semantics change.
@@ -109,9 +115,9 @@ Transcript ledgers are atomic JSON files under Application Support, written once
 Launch removes weekly window ledgers whose reset time has passed and keeps calendar ledgers, which can hold history whose source files are gone.
 Snapshots, prices, and bounded capacity samples stay in `UserDefaults`.
 It does not retain raw transcript text.
-Activity cards and their tooltips reuse one in-memory summary per provider and calendar period.
+Activity cards reuse one in-memory summary per provider and interval, which the All and month tooltip lines read too; the Codex per-login and image lines are recomputed when a tooltip renders.
 Reconciled Codex account activity is also reused across periods until the snapshot changes.
-Snapshot changes clear these summaries, and a new calendar interval replaces its period's entry.
+Snapshot changes clear these summaries.
 Day-key parsing uses a process-local `NSCache` with an 800-entry target to reuse dates across period queries.
 
 `StorageKeys` is the single registry for persisted Token Bar state.

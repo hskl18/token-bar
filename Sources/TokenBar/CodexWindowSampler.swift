@@ -2,17 +2,15 @@ import Foundation
 
 struct CodexWindowSampler {
     private let readChunkBytes = 1024 * 1024
-    private let defaults: UserDefaults
     private let parser: CodexTranscriptParser
     private let codexHomes: [URL]
     private let ledgerKey: String
     private let mixSampler: CodexMixSampler
 
     init(
-        defaults: UserDefaults = .standard, codexHome: URL? = nil, additionalHomes: [URL] = [], accountID: String? = nil,
+        codexHome: URL? = nil, additionalHomes: [URL] = [], accountID: String? = nil,
         weeklyResets: [String: Date] = [:]
     ) {
-        self.defaults = defaults
         codexHomes = Array(Set([codexHome ?? AccountSource.primaryDirectory(for: .codex)] + additionalHomes))
             .sorted { $0.path < $1.path }
         parser = CodexTranscriptParser(accountID: accountID, homes: codexHomes, weeklyResets: weeklyResets)
@@ -121,19 +119,7 @@ struct CodexWindowSampler {
             to: &result.byDayAndModel,
             fallback: mixSampler.savedMixLedger
         )
-        if ledgerKey == StorageKeys.codexWindowLedger, result.parseErrors == 0, result.observedTokens > 0 {
-            saveLastKnownMix(result.mixLedger)
-        }
         return result
-    }
-
-    func lastKnownMixLedger() -> MixLedger? {
-        if let data = defaults.data(forKey: StorageKeys.codexLastKnownMix),
-           let ledger = try? JSONDecoder().decode(MixLedger.self, from: data),
-           !ledger.byModel.isEmpty {
-            return ledger
-        }
-        return nil
     }
 
     private func sessionFiles(since windowStartedAt: Date) -> [TranscriptFile] {
@@ -252,11 +238,4 @@ struct CodexWindowSampler {
     private func save(_ ledger: CodexWindowLedger) {
         TranscriptCache.save(ledger, key: ledgerKey)
     }
-
-    private func saveLastKnownMix(_ ledger: MixLedger) {
-        guard let data = try? JSONEncoder().encode(ledger) else { return }
-        defaults.set(data, forKey: StorageKeys.codexLastKnownMix)
-    }
-
-
 }

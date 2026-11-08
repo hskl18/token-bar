@@ -63,13 +63,13 @@ enum CodexAppServerError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .executableMissing:
-            "No Codex CLI or Codex desktop runtime was found."
+            "Codex not installed."
         case let .launchFailed(message):
-            "Codex app-server could not start: \(message)"
+            "Codex app-server failed: \(message)"
         case .timedOut:
-            "Codex app-server did not respond within 10 seconds."
+            "Codex app-server timed out (10 s)."
         case .invalidResponse:
-            "Codex app-server returned an unreadable response."
+            "Unreadable Codex response."
         case let .server(message):
             message
         }
@@ -215,11 +215,8 @@ private func runServer(
         throw CodexAppServerError.launchFailed(error.localizedDescription)
     }
 
-    let timeout = DispatchWorkItem {
-        if process.isRunning {
-            process.terminate()
-        }
-    }
+    // Ending the child closes its output, which ends a read still waiting for a response.
+    let timeout = DispatchWorkItem { stopProcess(process) }
     DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10, execute: timeout)
     var responses: [Int: [String: Any]] = [:]
     var readBuffer = Data()
@@ -227,8 +224,7 @@ private func runServer(
     defer {
         timeout.cancel()
         try? input.fileHandleForWriting.close()
-        if process.isRunning { process.terminate() }
-        process.waitUntilExit()
+        stopProcess(process)
     }
 
     try send([
@@ -413,7 +409,6 @@ func parseCodexQuota(_ response: [String: Any]?) throws -> ProviderSnapshot {
 
     return ProviderSnapshot(
         connected: true,
-        plan: string(preferred.raw["planType"]) ?? string(result["planType"]),
         shortWindow: windows.count > 1 ? windows.first : nil,
         longWindow: windows.last,
         extraWindows: extraWindows,
@@ -440,7 +435,7 @@ private func parseActivity(_ response: [String: Any]?) throws -> TokenActivity {
     }
     guard lifetime != nil || !buckets.isEmpty else {
         throw CodexAppServerError.server(
-            "Codex account usage did not contain a recognized lifetime counter or daily bucket."
+            "Unreadable Codex usage totals."
         )
     }
     return TokenActivity(lifetimeTokens: lifetime, daily: buckets)

@@ -13,7 +13,9 @@ struct TranscriptFile {
                     at: root, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles]
                   ) else { continue }
             for case let url as URL in enumerator {
-                guard !AccountSource.isExcluded(url) else {
+                // The root is resolved and checked; the listing neither enters linked folders nor counts linked
+                // files as regular, so each entry needs only its own name checked.
+                guard url.lastPathComponent.lowercased() != "trash" else {
                     enumerator.skipDescendants()
                     continue
                 }

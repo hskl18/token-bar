@@ -4,6 +4,8 @@ struct ImageGenerationRecord: Codable, Hashable {
     var savedAt: Date
     var width: Int
     var height: Int
+    /// The Codex folder holding the earliest copy; nil on records saved when only `~/.codex` was scanned.
+    var folder: String? = nil
 
     var estimatedOutputTokens: Int64 {
         let w = max(16, (Double(width) / 16).rounded(.toNearestOrEven) * 16)
@@ -22,27 +24,19 @@ struct ImageGenerationUsage: Codable, Hashable {
     var records: [String: ImageGenerationRecord] = [:]
     var scanError: String? = nil
 
-    func cost(in interval: DateInterval) -> Double {
-        summary(in: interval).cost
+    /// `folders` limits the sum to images those Codex folders saved, such as one login's for its weekly estimate.
+    func cost(in interval: DateInterval, folders: Set<String>? = nil) -> Double {
+        summary(in: interval, folders: folders).cost
     }
 
-    private func summary(in interval: DateInterval) -> (cost: Double, count: Int) {
-        records.values.reduce(into: (cost: 0.0, count: 0)) { total, record in
-            guard record.savedAt >= interval.start, record.savedAt < interval.end else { return }
+    func summary(in interval: DateInterval, folders: Set<String>? = nil) -> (cost: Double, count: Int) {
+        let primary = AccountSource.primaryDirectory(for: .codex).path
+        return records.values.reduce(into: (cost: 0.0, count: 0)) { total, record in
+            guard record.savedAt >= interval.start, record.savedAt < interval.end,
+                  folders?.contains(record.folder ?? primary) ?? true else { return }
             total.cost += record.estimatedCostUSD
             total.count += 1
         }
-    }
-
-    func explanation(in interval: DateInterval) -> String {
-        let summary = summary(in: interval)
-        let amount = summary.cost.formatted(.currency(code: "USD").precision(.fractionLength(2)))
-        var text = "Includes ImageGen output estimate: \(amount) for \(summary.count) saved images. "
-            + "Assumes GPT Image 2 medium quality and uses saved dimensions as a size estimate. "
-            + "Prompt, reference-image input, and partial-image charges are excluded. "
-            + "Image estimates are not included in the displayed text-model token count."
-        if let scanError { text += " Image scan incomplete: \(scanError)" }
-        return text
     }
 }
 
@@ -53,34 +47,48 @@ struct ImageGenerationSampler {
         self.defaults = defaults
     }
 
-    func update() async -> ImageGenerationUsage {
-        await Task.detached(priority: .utility) { scan() }.value
+    /// Scans `generated_images` in every Codex folder, since each login saves its own sessions' images.
+    func update(codexHomes: [URL]) async -> ImageGenerationUsage {
+        await Task.detached(priority: .utility) { scan(codexHomes: codexHomes) }.value
     }
 
-    private func scan() -> ImageGenerationUsage {
+    private func scan(codexHomes: [URL]) -> ImageGenerationUsage {
         var usage = defaults.data(forKey: StorageKeys.imageGenerationUsage)
             .flatMap { try? JSONDecoder().decode(ImageGenerationUsage.self, from: $0) }
             ?? ImageGenerationUsage()
         let previous = usage
         usage.scanError = nil
-        let home = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
-        let root = home.appendingPathComponent("generated_images", isDirectory: true)
-        guard !root.pathComponents.contains(where: { $0.lowercased() == "trash" }) else {
-            usage.scanError = "The configured image directory is excluded."
-            return usage
+        // A linked folder is read once; records are keyed by generation ID, so a copied image counts once.
+        var seen = Set<String>()
+        for home in codexHomes.sorted(by: { $0.path < $1.path }) {
+            let root = home.appendingPathComponent("generated_images", isDirectory: true).resolvingSymlinksInPath()
+            guard seen.insert(root.path).inserted else { continue }
+            guard !AccountSource.isExcluded(root) else {
+                usage.scanError = "The configured image directory is excluded."
+                continue
+            }
+            if FileManager.default.fileExists(atPath: root.path) { scan(root, folder: home.path, into: &usage) }
         }
-        guard FileManager.default.fileExists(atPath: root.path) else { return usage }
+        if usage != previous, let data = try? JSONEncoder().encode(usage) {
+            defaults.set(data, forKey: StorageKeys.imageGenerationUsage)
+        }
+        return usage
+    }
+
+    private func scan(_ root: URL, folder: String, into usage: inout ImageGenerationUsage) {
         let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey, .creationDateKey, .contentModificationDateKey]
+        var enumerationError: String?
         guard let files = FileManager.default.enumerator(
             at: root, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles],
             errorHandler: { _, error in
-                usage.scanError = error.localizedDescription
+                enumerationError = error.localizedDescription
                 return true
             }
         ) else {
             usage.scanError = "The generated image directory could not be read."
-            return usage
+            return
         }
+        defer { if let enumerationError { usage.scanError = enumerationError } }
 
         for case let url as URL in files {
             if Task.isCancelled { break }
@@ -89,25 +97,29 @@ struct ImageGenerationSampler {
                 continue
             }
             let name = url.deletingPathExtension().lastPathComponent
-            guard url.pathExtension.lowercased() == "png", let id = generationID(name),
-                  usage.records[id] == nil else { continue }
+            guard url.pathExtension.lowercased() == "png", let id = generationID(name) else { continue }
             do {
                 let metadata = try url.resourceValues(forKeys: Set(keys))
                 guard metadata.isRegularFile == true, metadata.isSymbolicLink != true,
                       let savedAt = metadata.creationDate ?? metadata.contentModificationDate
                 else { continue }
+                // A copy in another folder keeps the earliest save, which is when the image was made,
+                // and an older record learns the folder it came from.
+                if let record = usage.records[id] {
+                    if savedAt < record.savedAt || (savedAt == record.savedAt && record.folder == nil) {
+                        usage.records[id]?.savedAt = savedAt
+                        usage.records[id]?.folder = folder
+                    }
+                    continue
+                }
                 guard let dimensions = try dimensions(of: url) else { continue }
                 usage.records[id] = ImageGenerationRecord(
-                    savedAt: savedAt, width: dimensions.width, height: dimensions.height
+                    savedAt: savedAt, width: dimensions.width, height: dimensions.height, folder: folder
                 )
             } catch {
                 usage.scanError = error.localizedDescription
             }
         }
-        if usage != previous, let data = try? JSONEncoder().encode(usage) {
-            defaults.set(data, forKey: StorageKeys.imageGenerationUsage)
-        }
-        return usage
     }
 
     private func generationID(_ name: String) -> String? {

@@ -74,6 +74,31 @@ final class UsageAccountingTests: XCTestCase {
         XCTAssertEqual(events(creator: "cli", folderLogin: nil), 1, "an unknown folder login keeps every session")
     }
 
+    func testStreamedAndCopiedClaudeMessagesCountOnce() {
+        func lines(outputs: [Int]) -> Data {
+            Data(outputs.map {
+                #"{"type":"assistant","timestamp":"2026-11-06T10:00:00Z","requestId":"req_1","sessionId":"s1","#
+                    + #""message":{"id":"msg_1","model":"claude-sonnet-4-5","usage":{"input_tokens":100,"output_tokens":\#($0)}}}"#
+                    + "\n"
+            }.joined().utf8)
+        }
+        func total(_ ledger: ClaudeUsageLedger) -> Int64 {
+            ledger.byDayAndModel.values.flatMap(\.values).reduce(0) { $0 + $1.total }
+        }
+        let sampler = ClaudeMixSampler()
+        var ledger = ClaudeUsageLedger.empty
+
+        // Two streamed snapshots of one message, then a resumed session's copy of it in another file.
+        sampler.parseLines(lines(outputs: [10, 25]), ledger: &ledger, settled: [], cutoffDay: "2026-01-01")
+        sampler.parseLines(lines(outputs: [25]), ledger: &ledger, settled: [], cutoffDay: "2026-01-01")
+        XCTAssertEqual(total(ledger), 125)
+
+        // Once its day settles only the message's hash remains, which still keeps a later copy out.
+        var later = ClaudeUsageLedger.empty
+        sampler.parseLines(lines(outputs: [25]), ledger: &later, settled: Set(ledger.messageUsage.keys), cutoffDay: "2026-01-01")
+        XCTAssertEqual(total(later), 0)
+    }
+
     func testClaudeLimitsRowsReplaceLegacyFieldsWithoutTouchingAllModels() throws {
         let reset = "2026-10-15T20:00:00Z"
         let body: [String: Any] = [

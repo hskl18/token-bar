@@ -82,24 +82,34 @@ enum ClaudeClientError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .credentialMissing:
-            "Sign in with Claude Code, then refresh."
+            "Signed out."
         case .credentialUnreadable:
-            "Claude credentials unavailable."
+            "Keychain sign-in unreadable."
         case let .requestFailed(message):
             message
         case .rateLimited:
-            "Claude rate limited. Try later."
+            "Rate limited."
         case .authenticationExpired:
-            "Claude sign-in expired. Open Claude Code, then refresh."
+            "Sign-in expired."
         case .accessDenied:
-            "Claude access denied. Sign in again."
+            "Access denied (HTTP 403)."
         case .invalidResponse:
-            "Claude returned usage data in an unsupported format."
+            "Unreadable usage response."
         }
     }
 }
 
 struct ClaudeClient {
+    // One session for every request, since a session is kept until it is invalidated; logins must not share cookies.
+    private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        return URLSession(configuration: configuration)
+    }()
+
     private static let cliVersion = Task.detached(priority: .utility) { () -> String? in
         guard let executable = claudeExecutable() else { return nil }
         let process = Process()
@@ -110,7 +120,7 @@ struct ClaudeClient {
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         guard (try? process.run()) != nil else { return nil }
-        defer { stopClaudeProcess(process) }
+        defer { stopProcess(process) }
         let deadline = Date().addingTimeInterval(2)
         while process.isRunning, Date() < deadline {
             try? await Task.sleep(for: .milliseconds(20))
@@ -175,13 +185,11 @@ struct ClaudeClient {
         var response = try await requestUsage(token: initialToken)
 
         if response.http.statusCode == 401 || response.http.statusCode == 403 {
+            // Claude Code may have renewed the sign-in since the first read, or ended it.
             try Task.checkCancellation()
-            var token = await Task.detached(priority: .utility) {
-                try? readClaudeKeychainCredential(profile: profile)
-            }.value ?? initialToken
-            if response.http.statusCode == 401, token == initialToken {
-                token = await ClaudeCLIRecovery.shared.refresh(profile: profile, token: initialToken) ?? token
-            }
+            let token = try await Task.detached(priority: .utility) {
+                try readClaudeKeychainCredential(profile: profile)
+            }.value
             try Task.checkCancellation()
             if token != initialToken {
                 currentToken = token
@@ -240,15 +248,10 @@ struct ClaudeClient {
             request.setValue("TokenBar", forHTTPHeaderField: "User-Agent")
         }
 
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.urlCache = nil
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        let session = URLSession(configuration: configuration)
-
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await Self.session.data(for: request)
         } catch {
             throw ClaudeClientError.requestFailed("Claude usage request failed: \(error.localizedDescription)")
         }
@@ -325,7 +328,6 @@ struct ClaudeClient {
 
         return ProviderSnapshot(
             connected: true,
-            plan: "Claude Code",
             shortWindow: windows.first { $0.limitID == "claude" && $0.windowMinutes == 5 * 60 },
             longWindow: windows.first { $0.limitID == "claude" && $0.windowMinutes == 7 * 24 * 60 },
             extraWindows: windows.filter { $0.limitID != "claude" },
@@ -362,25 +364,6 @@ private func parseClaudeWeeklyResetCredits(_ raw: Any?, at now: Date = Date()) -
         grantID = grantID ?? id
     }
     return (count, grantID)
-}
-
-private actor ClaudeCLIRecovery {
-    static let shared = ClaudeCLIRecovery()
-    private var lastAttempts: [String: Date] = [:]
-
-    func refresh(profile: ClaudeAccountProfile?, token: String) async -> String? {
-        let key = profile?.configDirectory.path ?? AccountSource.primaryDirectory(for: .claude).path
-        if let previous = lastAttempts[key], Date().timeIntervalSince(previous) < 5 * 60 { return nil }
-        lastAttempts[key] = Date()
-        let task = Task.detached(priority: .utility) {
-            runClaudeToRefresh(profile: profile, token: token)
-        }
-        return await withTaskCancellationHandler {
-            await task.value
-        } onCancel: {
-            task.cancel()
-        }
-    }
 }
 
 actor ClaudeWindowStarter {
@@ -436,7 +419,7 @@ private func runClaudeToStartWindow(profile: ClaudeAccountProfile?) -> String? {
     let deadline = Date().addingTimeInterval(60)
     while process.isRunning, Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
     let timedOut = process.isRunning
-    stopClaudeProcess(process)
+    stopProcess(process)
     if !timedOut, process.terminationReason == .exit, process.terminationStatus == 0 { return nil }
     let reason = ((try? String(contentsOf: log, encoding: .utf8)) ?? "")
         .split(whereSeparator: \.isNewline).last.map { String($0.prefix(160)) }
@@ -466,57 +449,13 @@ private func claudeEnvironment(profile: ClaudeAccountProfile?) -> [String: Strin
     return environment
 }
 
-private func stopClaudeProcess(_ process: Process) {
+/// Ends a child that ignores SIGTERM with SIGKILL after one second, then reaps it.
+func stopProcess(_ process: Process) {
     if process.isRunning { process.terminate() }
     let grace = Date().addingTimeInterval(1)
     while process.isRunning, Date() < grace { Thread.sleep(forTimeInterval: 0.05) }
     if process.isRunning { kill(process.processIdentifier, SIGKILL) }
     process.waitUntilExit()
-}
-
-private func runClaudeToRefresh(profile: ClaudeAccountProfile?, token: String) -> String? {
-    guard let executable = claudeExecutable(), !Task.isCancelled else { return nil }
-
-    var master: Int32 = -1
-    var slave: Int32 = -1
-    var size = winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)
-    guard openpty(&master, &slave, nil, nil, &size) == 0 else { return nil }
-    defer { close(master) }
-    let terminal = FileHandle(fileDescriptor: slave, closeOnDealloc: true)
-    defer { try? terminal.close() }
-    let process = Process()
-    process.executableURL = executable
-    process.arguments = ["--safe-mode"]
-    process.currentDirectoryURL = profile?.configDirectory ?? AccountSource.primaryDirectory(for: .claude)
-    process.environment = claudeEnvironment(profile: profile)
-    process.standardInput = terminal
-    process.standardOutput = terminal
-    process.standardError = terminal
-    guard (try? process.run()) != nil else { return nil }
-    defer { stopClaudeProcess(process) }
-
-    // Claude startup needs a TTY to renew OAuth without a model prompt.
-    let deadline = Date().addingTimeInterval(15)
-    var nextRead = Date()
-    var bytes = [UInt8](repeating: 0, count: 8_192)
-    while process.isRunning, Date() < deadline, !Task.isCancelled {
-        if Date() >= nextRead {
-            if let refreshed = try? readClaudeKeychainCredential(profile: profile), refreshed != token {
-                return refreshed
-            }
-            nextRead = Date().addingTimeInterval(1)
-        }
-        var descriptor = pollfd(fd: master, events: Int16(POLLIN), revents: 0)
-        if poll(&descriptor, 1, 250) > 0 {
-            let count = bytes.withUnsafeMutableBytes { read(master, $0.baseAddress, $0.count) }
-            if count <= 0 { break }
-        }
-    }
-    if !Task.isCancelled,
-       let refreshed = try? readClaudeKeychainCredential(profile: profile), refreshed != token {
-        return refreshed
-    }
-    return nil
 }
 
 private func readClaudeKeychainCredential(profile: ClaudeAccountProfile?) throws -> String {
@@ -539,8 +478,9 @@ private func readClaudeKeychainCredential(profile: ClaudeAccountProfile?) throws
             continue
         }
 
-        guard let token = oauthToken(in: secret.output) else {
-            foundUnreadableCredential = true
+        guard let token = try oauthToken(in: secret.output) else {
+            // Claude Code empties the tokens but keeps the item when a sign-in ends; that is signed out.
+            if (try? JSONSerialization.jsonObject(with: secret.output)) == nil { foundUnreadableCredential = true }
             continue
         }
         return token
@@ -552,7 +492,7 @@ private func readClaudeKeychainCredential(profile: ClaudeAccountProfile?) throws
     if let values = try? fallback.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
        values.isRegularFile == true, values.isSymbolicLink != true {
         guard let data = try? Data(contentsOf: fallback),
-              let token = oauthToken(in: data) else {
+              let token = try oauthToken(in: data) else {
             throw ClaudeClientError.credentialUnreadable
         }
         return token
@@ -564,12 +504,16 @@ private func readClaudeKeychainCredential(profile: ClaudeAccountProfile?) throws
     throw ClaudeClientError.credentialMissing
 }
 
-private func oauthToken(in data: Data) -> String? {
+private func oauthToken(in data: Data) throws -> String? {
     guard let object = try? JSONSerialization.jsonObject(with: data),
           let root = object as? [String: Any],
           let oauth = root["claudeAiOauth"] as? [String: Any],
           let token = oauth["accessToken"] as? String, !token.isEmpty
     else { return nil }
+    // An expired token only earns a 401, and repeated 401s draw 429s; Claude Code renews it when it runs.
+    if let expiresAt = oauth["expiresAt"] as? Double, expiresAt / 1000 <= Date().timeIntervalSince1970 {
+        throw ClaudeClientError.authenticationExpired
+    }
     return token
 }
 
@@ -583,6 +527,10 @@ private func runSecurity(_ arguments: [String]) -> (status: Int32, output: Data)
     process.standardError = errors
 
     guard (try? process.run()) != nil else { return (-1, Data()) }
+    // An unanswered Keychain prompt would otherwise hold the refresh forever; a minute leaves time to answer it.
+    let timeout = DispatchWorkItem { stopProcess(process) }
+    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 60, execute: timeout)
+    defer { timeout.cancel() }
     let outputData = output.fileHandleForReading.readDataToEndOfFile()
     let errorData = errors.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
