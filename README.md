@@ -17,9 +17,29 @@ A native macOS menu bar monitor for Claude Code and OpenAI Codex.
 - 🟠 Last-known values when a provider becomes stale
 - 🔒 Local aggregation without raw transcript uploads
 - 🧊 Liquid Glass on macOS 26 with a Material fallback
+- 🔁 Weekly reset credits you can spend from the menu
+- ⏱️ Automatic starts for idle Claude 5-hour windows
+- 🧭 `cl` and `cdx` launchers that start each session on the login whose quota should go first
 
 The dollar values show API-equivalent estimates, not subscription charges.
 The screenshot uses local synthetic preview data.
+
+## Use at your own risk
+
+Token Bar is an unofficial tool for personal use and testing.
+Anthropic and OpenAI do not make, endorse, or support it.
+
+Some features rely on behavior the providers do not document, and some may conflict with their terms:
+
+- Token Bar reads your Claude Code sign-in from the macOS Keychain and uses it to call Claude's undocumented usage endpoint, the one Claude Code's `/usage` reads.
+  It spends Claude reset credits through the same undocumented protocol.
+- It starts idle Claude 5-hour windows by running the installed `claude` CLI, and each start counts against your usage limits.
+- The `cl` and `cdx` launchers choose among several of your own logins by the quota each has left.
+  Anthropic sets its limits for ordinary, individual use, and both providers forbid sharing a login with anyone else.
+
+Anthropic and OpenAI can change or block these endpoints without notice, and can limit, suspend, or close an account that breaks their terms.
+You run Token Bar at your own risk; the [MIT license](LICENSE) provides it as is, without warranty.
+Read Anthropic's [Consumer Terms](https://www.anthropic.com/legal/consumer-terms) and [credential-use policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) and OpenAI's [Terms of Use](https://openai.com/policies/terms-of-use/) before you run it.
 
 ## Build from source
 
@@ -52,6 +72,8 @@ Read the technical notes in [`docs/`](docs/README.md):
 
 - [Accuracy and pricing](docs/PRICING.md)
 - [Claude data boundaries](docs/CLAUDE-USAGE.md)
+- [Weekly reset credits](docs/RESET-CREDITS.md)
+- [Shared accounts](docs/SHARED-ACCOUNTS.md)
 - [Architecture and performance](docs/ARCHITECTURE.md)
 - [Local development](docs/DEVELOPMENT.md)
 - [Design system](docs/DESIGN.md)
@@ -67,4 +89,5 @@ Leave out credentials, tokens, and private transcript content.
 
 [MIT](LICENSE)
 
+Claude, Claude Code, Codex, and their marks belong to Anthropic and OpenAI.
 Token Bar is not affiliated with Anthropic, OpenAI, Bandai Namco, or Sunrise.

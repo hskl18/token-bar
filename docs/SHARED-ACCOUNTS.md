@@ -1,8 +1,9 @@
 # Shared accounts
 
 Tested on October 26, 2026 with Claude Code 2.1.311 and Codex CLI 0.164.0 on macOS.
-With several Claude or Codex logins, these scripts give every login one shared history and start each session on the login whose quota should be used first.
+With several Claude or Codex logins of your own, these scripts give every login one shared history and start each session on the login whose quota should be used first.
 Token Bar keeps counting each login's usage separately.
+Use only logins that belong to you: Anthropic and OpenAI forbid sharing a login, and Anthropic sets its limits for ordinary, individual use; see [Use at your own risk](../README.md#use-at-your-own-risk).
 
 The scripts live in [`scripts/accounts/`](../scripts/accounts/):
 
