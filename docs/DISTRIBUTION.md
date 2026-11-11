@@ -1,6 +1,6 @@
 # Distribution
 
-The current `scripts/build-app.sh` output is an arm64 app with an ad-hoc signature.
+The current `scripts/build-app.sh` builds for the Mac's own architecture and applies an ad-hoc signature.
 It is suitable for local development, not a trusted public download.
 
 Apple requires an active [Apple Developer Program](https://developer.apple.com/programs/whats-included/) membership for Developer ID certificates.

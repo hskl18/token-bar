@@ -5,8 +5,9 @@ Each source answers a different question.
 
 ## Current quota windows
 
-Anthropic's Claude Code OAuth usage endpoint provides the current 5-hour and 7-day percentages.
+Claude Code's OAuth usage endpoint, `GET /api/oauth/usage`, provides the current 5-hour and 7-day percentages.
 It can also provide reset times, model-specific weekly windows, and an enabled usage-credit allowance.
+Anthropic does not document this endpoint and can change or close it without notice; see [Use at your own risk](../README.md#use-at-your-own-risk).
 The allowance has no reset time, so Token Bar uses the start of the next UTC month, which claude.ai shows for a monthly spend limit, unless a monthly `spend` limit row names one.
 
 Token Bar reads the existing Claude Code OAuth credential from macOS Keychain through `/usr/bin/security`.
@@ -41,7 +42,8 @@ claude -p hi --model haiku --effort low --settings '{"alwaysThinkingEnabled":fal
 
 The flags skip user customizations, tools, thinking, and transcripts, so the prompt stays small and never enters local history.
 Each start still counts against the account's usage limits.
-Anthropic's [credential-use policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) reserves subscription OAuth for ordinary Claude Code use, so Token Bar runs the unmodified CLI instead of calling the API with stored credentials.
+Anthropic's [credential-use policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) reserves subscription OAuth for ordinary Claude Code use, so Token Bar sends no model request with the stored credential and runs the unmodified CLI instead.
+It still reads that credential to fetch quota and spend reset credits, which may conflict with the same policy.
 Each account tries at most once every 15 minutes, and a refresh one minute after each 5-hour reset starts the next window while the Mac is awake.
 
 ## Local token history
