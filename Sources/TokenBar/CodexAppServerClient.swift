@@ -102,8 +102,10 @@ struct CodexAppServerClient {
         }
     }
 
+    /// `creditDetails` asks for each reset credit's expiry, a separate backend lookup background polls skip.
     func fetch(
-        codexHome: URL? = nil, includeActivity: Bool = true, readings: CodexQuotaReadings? = nil
+        codexHome: URL? = nil, includeActivity: Bool = true, readings: CodexQuotaReadings? = nil,
+        creditDetails: Bool = false
     ) async throws -> CodexFetchResult {
         let candidates = CodexRuntimeLocator.live().candidates()
         guard !candidates.isEmpty else {
@@ -122,6 +124,7 @@ struct CodexAppServerClient {
                         codexHome: codexHome,
                         includeActivity: includeActivity,
                         readings: readings,
+                        creditDetails: creditDetails,
                         started: { process in
                             child.withLockUnchecked { $0 = process }
                             if Task.isCancelled { process.terminate() }
@@ -180,7 +183,8 @@ private extension CodexFetchResult {
 
 private func runServer(
     executableURL: URL, codexHome: URL?, includeActivity: Bool, readings: CodexQuotaReadings?,
-    reset: (requestID: String, accountID: String)? = nil, started: (Process) -> Void = { _ in }
+    creditDetails: Bool = false, reset: (requestID: String, accountID: String)? = nil,
+    started: (Process) -> Void = { _ in }
 ) throws -> [Int: [String: Any]] {
     let process = Process()
     let input = Pipe()
@@ -277,7 +281,7 @@ private func runServer(
     }
     // Codex reports undecodable params as -32600; retry without the background-poll flag.
     func readRateLimits() throws -> [String: Any] {
-        for params in [["excludeResetCreditDetails": true], nil] as [[String: Any]?] {
+        for params in [["excludeResetCreditDetails": !creditDetails], nil] as [[String: Any]?] {
             var request: [String: Any] = ["method": "account/rateLimits/read", "id": 2]
             request["params"] = params
             responses[2] = nil
@@ -407,14 +411,18 @@ func parseCodexQuota(_ response: [String: Any]?) throws -> ProviderSnapshot {
         return $0.id < $1.id
     }
 
+    let credits = dictionary(result["rateLimitResetCredits"])
     return ProviderSnapshot(
         connected: true,
         shortWindow: windows.count > 1 ? windows.first : nil,
         longWindow: windows.last,
         extraWindows: extraWindows,
         error: nil,
-        weeklyResetCredits: integer(dictionary(result["rateLimitResetCredits"])?["availableCount"])
-            .flatMap { $0 >= 0 ? $0 : nil },
+        weeklyResetCredits: integer(credits?["availableCount"]).flatMap { $0 >= 0 ? $0 : nil },
+        // Null `expiresAt` is a credit that never expires; a missing list means the details were not read.
+        resetCreditExpiries: (credits?["credits"] as? [[String: Any]])?
+            .filter { string($0["status"]) == "available" }
+            .map { int64($0["expiresAt"]).map { Date(timeIntervalSince1970: TimeInterval($0)) } },
         resetCreditsFetched: true
     )
 }

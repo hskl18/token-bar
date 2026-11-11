@@ -11,7 +11,7 @@ struct WeeklyCapacityEstimator {
     ) -> WeeklyTokenCapacityEstimate? {
         guard let minutes = window.windowMinutes,
               let resetsAt = window.resetsAt,
-              minutes == 7 * 24 * 60,
+              minutes == LimitWindow.weeklyMinutes,
               window.usedPercent.isFinite,
               window.usedPercent >= 0,
               observedCostUSD.isFinite, observedCostUSD > 0, observedTokens > 0

@@ -88,7 +88,7 @@ Then quit Token Bar and delete the `tokenbar.claude-window-ledger.*.json` files 
 ## One login in several folders
 
 Token Bar counts a login once even when several folders are signed in to it.
-Its row reads the quota with the first folder's credential, and its weekly estimate counts sessions started in every one of those folders.
+Its row reads the quota with the first of those folders that holds a sign-in and still names that login, so a renamed folder without a Keychain entry does not sign it out, and its weekly estimate counts sessions started in every one of those folders.
 
 ## Share Codex history
 

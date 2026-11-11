@@ -47,13 +47,15 @@ struct ClaudeAccountProfile: Hashable, Sendable {
         return (profiles, primaryAliases)
     }
 
-    var keychainService: String {
-        let digest = SHA256.hash(data: Data(configDirectory.path.utf8))
+    var keychainService: String { Self.keychainService(for: configDirectory) }
+
+    static func keychainService(for directory: URL) -> String {
+        let digest = SHA256.hash(data: Data(directory.path.utf8))
         let suffix = digest.prefix(4).map { String(format: "%02x", $0) }.joined()
         return "Claude Code-credentials-\(suffix)"
     }
 
-    private static func accountID(in file: URL) -> String? {
+    static func accountID(in file: URL) -> String? {
         struct Configuration: Decodable {
             struct Identity: Decodable {
                 let accountUuid: String
@@ -133,9 +135,10 @@ struct ClaudeClient {
         return version
     }
 
-    func fetch(profile: ClaudeAccountProfile? = nil) async throws -> ProviderSnapshot {
+    /// `primaryAliases` are the folders signed in to the primary folder's login, used when `profile` is nil.
+    func fetch(profile: ClaudeAccountProfile? = nil, primaryAliases: [URL] = []) async throws -> ProviderSnapshot {
         let accountID = ClaudeAccountProfile.currentAccountID(for: profile)
-        var snapshot = try parseSnapshot(data: try await fetchUsage(profile: profile).data)
+        var snapshot = try parseSnapshot(data: try await fetchUsage(profile: profile, primaryAliases: primaryAliases).data)
         if accountID == ClaudeAccountProfile.currentAccountID(for: profile) {
             snapshot.resetAccountID = accountID
         } else {
@@ -144,7 +147,9 @@ struct ClaudeClient {
         return snapshot
     }
 
-    func consumeWeeklyReset(profile: ClaudeAccountProfile?, expectedAccountID: String) async throws {
+    func consumeWeeklyReset(
+        profile: ClaudeAccountProfile?, primaryAliases: [URL] = [], expectedAccountID: String
+    ) async throws {
         func currentAccountID() -> String? {
             ClaudeAccountProfile.currentAccountID(for: profile)
         }
@@ -153,7 +158,7 @@ struct ClaudeClient {
               UUID(uuidString: organization) != nil else {
             throw ClaudeClientError.requestFailed("The account in this folder changed. Refresh before using a reset.")
         }
-        let usage = try await fetchUsage(profile: profile)
+        let usage = try await fetchUsage(profile: profile, primaryAliases: primaryAliases)
         guard currentAccountID() == expectedAccountID else {
             throw ClaudeClientError.requestFailed("The account changed while checking reset credits. Refresh and try again.")
         }
@@ -177,9 +182,11 @@ struct ClaudeClient {
         }
     }
 
-    private func fetchUsage(profile: ClaudeAccountProfile?) async throws -> (data: Data, token: String) {
+    private func fetchUsage(
+        profile: ClaudeAccountProfile?, primaryAliases: [URL]
+    ) async throws -> (data: Data, token: String) {
         let initialToken = try await Task.detached(priority: .utility) {
-            try readClaudeKeychainCredential(profile: profile)
+            try readClaudeKeychainCredential(profile: profile, primaryAliases: primaryAliases)
         }.value
         var currentToken = initialToken
         var response = try await requestUsage(token: initialToken)
@@ -188,7 +195,7 @@ struct ClaudeClient {
             // Claude Code may have renewed the sign-in since the first read, or ended it.
             try Task.checkCancellation()
             let token = try await Task.detached(priority: .utility) {
-                try readClaudeKeychainCredential(profile: profile)
+                try readClaudeKeychainCredential(profile: profile, primaryAliases: primaryAliases)
             }.value
             try Task.checkCancellation()
             if token != initialToken {
@@ -271,15 +278,15 @@ struct ClaudeClient {
         }
 
         var windows: [LimitWindow] = []
-        if let session = parseClaudeWindow(root["five_hour"], label: "5-hour window", minutes: 5 * 60) {
+        if let session = parseClaudeWindow(root["five_hour"], label: "5-hour window", minutes: LimitWindow.sessionMinutes) {
             windows.append(session)
         }
-        if let weekly = parseClaudeWindow(root["seven_day"], label: "All models", minutes: 7 * 24 * 60) {
+        if let weekly = parseClaudeWindow(root["seven_day"], label: "All models", minutes: LimitWindow.weeklyMinutes) {
             windows.append(weekly)
         }
         for (key, raw) in root.sorted(by: { $0.key < $1.key }) where key.hasPrefix("seven_day_") {
             let name = key.dropFirst("seven_day_".count).replacingOccurrences(of: "_", with: " ").capitalized
-            if var window = parseClaudeWindow(raw, label: name, minutes: 7 * 24 * 60) {
+            if var window = parseClaudeWindow(raw, label: name, minutes: LimitWindow.weeklyMinutes) {
                 window.limitID = "claude:\(key)"
                 window.limitName = name
                 windows.append(window)
@@ -293,7 +300,7 @@ struct ClaudeClient {
             let scope = row["scope"] as? [String: Any]
             let model = scope?["model"] as? [String: Any]
             let name = model?["display_name"] as? String ?? kind
-            let minutes = kind == "session" ? 300 : 10080
+            let minutes = kind == "session" ? LimitWindow.sessionMinutes : LimitWindow.weeklyMinutes
             let label = kind == "session" ? "5-hour window" : kind == "weekly_all" ? "All models" : name
             guard var window = parseClaudeWindow(row, label: label, minutes: minutes) else { continue }
             if kind == "weekly_scoped" {
@@ -326,24 +333,29 @@ struct ClaudeClient {
             throw ClaudeClientError.invalidResponse
         }
 
+        let credits = parseClaudeWeeklyResetCredits(root["cedar_ember"])
         return ProviderSnapshot(
             connected: true,
-            shortWindow: windows.first { $0.limitID == "claude" && $0.windowMinutes == 5 * 60 },
-            longWindow: windows.first { $0.limitID == "claude" && $0.windowMinutes == 7 * 24 * 60 },
+            shortWindow: windows.first { $0.limitID == "claude" && $0.windowMinutes == LimitWindow.sessionMinutes },
+            longWindow: windows.first { $0.limitID == "claude" && $0.windowMinutes == LimitWindow.weeklyMinutes },
             extraWindows: windows.filter { $0.limitID != "claude" },
             error: nil,
-            weeklyResetCredits: parseClaudeWeeklyResetCredits(root["cedar_ember"])?.count,
+            weeklyResetCredits: credits?.count,
+            resetCreditExpiries: credits?.expiries,
             resetCreditsFetched: true
         )
     }
 }
 
-private func parseClaudeWeeklyResetCredits(_ raw: Any?, at now: Date = Date()) -> (count: Int, grantID: String?)? {
+private func parseClaudeWeeklyResetCredits(
+    _ raw: Any?, at now: Date = Date()
+) -> (count: Int, grantID: String?, expiries: [Date?])? {
     guard let block = raw as? [String: Any], let eligible = block["eligible"] as? Bool else { return nil }
-    guard eligible else { return block["ineligible_reason"] as? String == "no_grant" ? (0, nil) : nil }
+    guard eligible else { return block["ineligible_reason"] as? String == "no_grant" ? (0, nil, []) : nil }
     guard let grants = block["grants"] as? [[String: Any]] else { return nil }
     var count = 0
     var grantID: String?
+    var expiries: [Date?] = []
     for grant in grants {
         guard let left = grant["resets_left"] as? Int, left >= 0,
               let clears = grant["clears"] as? [String] else { return nil }
@@ -353,8 +365,10 @@ private func parseClaudeWeeklyResetCredits(_ raw: Any?, at now: Date = Date()) -
             guard let start = parseISO8601(rawStart) else { return nil }
             if start > now { continue }
         }
+        var end: Date?
         if let rawEnd = grant["ends_at"] as? String {
-            guard let end = parseISO8601(rawEnd) else { return nil }
+            end = parseISO8601(rawEnd)
+            guard let end else { return nil }
             if end <= now { continue }
         }
         guard let id = grant["id"] as? String, !id.isEmpty else { return nil }
@@ -362,8 +376,9 @@ private func parseClaudeWeeklyResetCredits(_ raw: Any?, at now: Date = Date()) -
         guard !sum.overflow else { return nil }
         count = sum.partialValue
         grantID = grantID ?? id
+        expiries += Array(repeating: end, count: min(left, 100))
     }
-    return (count, grantID)
+    return (count, grantID, expiries)
 }
 
 actor ClaudeWindowStarter {
@@ -372,7 +387,7 @@ actor ClaudeWindowStarter {
     private var attempts: [String: (date: Date, error: String?)] = [:]
 
     // Returns false when the profile already attempted a start within 15 minutes.
-    func start(profile: ClaudeAccountProfile?) async throws -> Bool {
+    func start(profile: ClaudeAccountProfile?, primaryAliases: [URL] = []) async throws -> Bool {
         let key = profile?.configDirectory.path ?? AccountSource.primaryDirectory(for: .claude).path
         if let previous = attempts[key], Date().timeIntervalSince(previous.date) < 15 * 60 {
             if let error = previous.error { throw ClaudeClientError.requestFailed(error) }
@@ -380,7 +395,9 @@ actor ClaudeWindowStarter {
         }
         let date = Date()
         attempts[key] = (date, nil)
-        let error = await Task.detached(priority: .utility) { runClaudeToStartWindow(profile: profile) }.value
+        let error = await Task.detached(priority: .utility) {
+            runClaudeToStartWindow(profile: profile, primaryAliases: primaryAliases)
+        }.value
         attempts[key] = (date, error.map { "Claude 5-hour window start failed: \($0)" })
         if let error = attempts[key]?.error {
             log.error("\(key, privacy: .public): \(error, privacy: .public)")
@@ -391,8 +408,13 @@ actor ClaudeWindowStarter {
     }
 }
 
-private func runClaudeToStartWindow(profile: ClaudeAccountProfile?) -> String? {
+private func runClaudeToStartWindow(profile: ClaudeAccountProfile?, primaryAliases: [URL]) -> String? {
     guard let executable = claudeExecutable() else { return "Claude Code CLI not found." }
+    // Run in a folder that holds the sign-in; an expired one is fine, since the CLI renews it.
+    let primary = AccountSource.primaryDirectory(for: .claude)
+    let directory = (try? readClaudeLoginCredential(
+        profile: profile, primaryAliases: primaryAliases, allowExpired: true
+    ))?.directory ?? profile?.configDirectory ?? primary
     let log = FileManager.default.temporaryDirectory
         .appendingPathComponent("tokenbar-claude-window-\(UUID().uuidString).log")
     guard FileManager.default.createFile(atPath: log.path, contents: nil),
@@ -410,8 +432,8 @@ private func runClaudeToStartWindow(profile: ClaudeAccountProfile?) -> String? {
         "--safe-mode", "--strict-mcp-config", "--system-prompt", "Reply with one word.",
         "--no-session-persistence", "--max-turns", "1", "--tools", "",
     ]
-    process.currentDirectoryURL = profile?.configDirectory ?? AccountSource.primaryDirectory(for: .claude)
-    process.environment = claudeEnvironment(profile: profile)
+    process.currentDirectoryURL = directory
+    process.environment = claudeEnvironment(configDirectory: directory == primary ? nil : directory)
     process.standardInput = FileHandle.nullDevice
     process.standardOutput = output
     process.standardError = output
@@ -438,9 +460,9 @@ private func claudeExecutable() -> URL? {
     }
 }
 
-private func claudeEnvironment(profile: ClaudeAccountProfile?) -> [String: String] {
+private func claudeEnvironment(configDirectory: URL?) -> [String: String] {
     var environment = ProcessInfo.processInfo.environment
-    environment["CLAUDE_CONFIG_DIR"] = profile?.configDirectory.path
+    environment["CLAUDE_CONFIG_DIR"] = configDirectory?.path
     // Keep inherited API and cloud credentials from replacing this profile's subscription login.
     for key in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
                 "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"] {
@@ -458,14 +480,69 @@ func stopProcess(_ process: Process) {
     process.waitUntilExit()
 }
 
-private func readClaudeKeychainCredential(profile: ClaudeAccountProfile?) throws -> String {
-    let username = NSUserName()
-    let credentialNames = profile.map { [$0.keychainService] } ?? [
-        "Claude Code-credentials",
-        "claude-credentials",
-        "Claude-credentials",
-        "claudecode-credentials",
+private func readClaudeKeychainCredential(profile: ClaudeAccountProfile?, primaryAliases: [URL]) throws -> String {
+    try readClaudeLoginCredential(profile: profile, primaryAliases: primaryAliases).token
+}
+
+/// One folder's sign-in: its `.credentials.json` and the Keychain items Claude Code keeps for it.
+struct ClaudeSignInLocation: Equatable {
+    /// The items Claude Code has used for the primary folder, newest name first.
+    static let primaryKeychainServices = [
+        "Claude Code-credentials", "claude-credentials", "Claude-credentials", "claudecode-credentials",
     ]
+
+    let directory: URL
+    let keychainServices: [String]
+
+    /// Every folder signed in to a login, the folder it is named after first;
+    /// for the primary login (`profile` nil) that is `~/.claude`, then `primaryAliases`.
+    static func all(for profile: ClaudeAccountProfile?, primaryAliases: [URL]) -> [ClaudeSignInLocation] {
+        let primary = profile == nil ? [ClaudeSignInLocation(
+            directory: AccountSource.primaryDirectory(for: .claude), keychainServices: primaryKeychainServices
+        )] : []
+        let folders = profile.map { [$0.configDirectory] + $0.aliases } ?? primaryAliases
+        return primary + folders.map {
+            ClaudeSignInLocation(directory: $0, keychainServices: [ClaudeAccountProfile.keychainService(for: $0)])
+        }
+    }
+
+    /// The first location `read` gets a token from: the folder a login is named after can be signed out, for
+    /// example after a rename, while another folder of the same login is signed in.
+    /// Without a sign-in anywhere, the error is an expired sign-in's, which starting a window renews, else the first
+    /// location's.
+    static func firstSignIn(
+        in locations: [ClaudeSignInLocation], read: (ClaudeSignInLocation) throws -> String
+    ) throws -> (token: String, location: ClaudeSignInLocation) {
+        var errors: [Error] = []
+        for location in locations {
+            do { return (try read(location), location) } catch { errors.append(error) }
+        }
+        let expired = errors.first {
+            if case ClaudeClientError.authenticationExpired = $0 { return true }
+            return false
+        }
+        throw expired ?? errors.first ?? ClaudeClientError.credentialMissing
+    }
+}
+
+private func readClaudeLoginCredential(
+    profile: ClaudeAccountProfile?, primaryAliases: [URL], allowExpired: Bool = false
+) throws -> (token: String, directory: URL) {
+    let locations = ClaudeSignInLocation.all(for: profile, primaryAliases: primaryAliases)
+    let expected = profile?.id ?? ClaudeAccountProfile.primaryAccountID
+    let found = try ClaudeSignInLocation.firstSignIn(in: locations) { location in
+        // An alias may have signed in to another login since discovery; its sign-in must not stand in for this one.
+        if location.directory != locations.first?.directory,
+           ClaudeAccountProfile.accountID(in: location.directory.appendingPathComponent(".claude.json")) != expected {
+            throw ClaudeClientError.credentialMissing
+        }
+        return try readClaudeCredential(names: location.keychainServices, directory: location.directory, allowExpired: allowExpired)
+    }
+    return (found.token, found.location.directory)
+}
+
+private func readClaudeCredential(names credentialNames: [String], directory: URL, allowExpired: Bool) throws -> String {
+    let username = NSUserName()
     var foundUnreadableCredential = false
 
     for name in credentialNames {
@@ -478,7 +555,7 @@ private func readClaudeKeychainCredential(profile: ClaudeAccountProfile?) throws
             continue
         }
 
-        guard let token = try oauthToken(in: secret.output) else {
+        guard let token = try oauthToken(in: secret.output, allowExpired: allowExpired) else {
             // Claude Code empties the tokens but keeps the item when a sign-in ends; that is signed out.
             if (try? JSONSerialization.jsonObject(with: secret.output)) == nil { foundUnreadableCredential = true }
             continue
@@ -486,13 +563,11 @@ private func readClaudeKeychainCredential(profile: ClaudeAccountProfile?) throws
         return token
     }
 
-    let directory = profile?.configDirectory
-        ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
     let fallback = directory.appendingPathComponent(".credentials.json")
     if let values = try? fallback.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
        values.isRegularFile == true, values.isSymbolicLink != true {
         guard let data = try? Data(contentsOf: fallback),
-              let token = try oauthToken(in: data) else {
+              let token = try oauthToken(in: data, allowExpired: allowExpired) else {
             throw ClaudeClientError.credentialUnreadable
         }
         return token
@@ -504,14 +579,14 @@ private func readClaudeKeychainCredential(profile: ClaudeAccountProfile?) throws
     throw ClaudeClientError.credentialMissing
 }
 
-private func oauthToken(in data: Data) throws -> String? {
+private func oauthToken(in data: Data, allowExpired: Bool = false) throws -> String? {
     guard let object = try? JSONSerialization.jsonObject(with: data),
           let root = object as? [String: Any],
           let oauth = root["claudeAiOauth"] as? [String: Any],
           let token = oauth["accessToken"] as? String, !token.isEmpty
     else { return nil }
     // An expired token only earns a 401, and repeated 401s draw 429s; Claude Code renews it when it runs.
-    if let expiresAt = oauth["expiresAt"] as? Double, expiresAt / 1000 <= Date().timeIntervalSince1970 {
+    if !allowExpired, let expiresAt = oauth["expiresAt"] as? Double, expiresAt / 1000 <= Date().timeIntervalSince1970 {
         throw ClaudeClientError.authenticationExpired
     }
     return token

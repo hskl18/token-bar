@@ -40,7 +40,7 @@ Each Codex account runs its own app-server child with `CODEX_HOME` set, inherite
 Folders the server reports as the same login share one quota request and appear once, preferring a fresh reading.
 Their local records share one incremental ledger, and each refresh scans that account's calendar and weekly window once.
 Activity selection uses its own successful-read timestamp rather than the freshness of the quota row.
-Claude folders signed in to the same login appear once, read with the first folder's credential, and their sessions share that login's weekly window scan.
+Claude folders signed in to the same login appear once, read with the first of their folders that holds a sign-in and still names that login, and their sessions share that login's weekly window scan.
 Extra accounts add quota rows, a weekly estimate from their login's local sessions, and their usage to the activity cards.
 Accounts can also share one history through linked folders; see [Shared accounts](SHARED-ACCOUNTS.md).
 
@@ -50,8 +50,9 @@ A header and All are marked stale when any account whose percentage they include
 Hovering the marker lists each stale account with its error and the time of the reading shown.
 An idle account, one without a 5-hour window whose sign-in expired, is not stale: its row says "Idle since <time>".
 Only the dual-provider state renders All, and each state has its own compact panel height.
-Both providers show every returned quota window, and the panel grows for extra rows until it reaches 85% of the screen height, after which the quota area scrolls.
-The UI lists 5-hour rows, then Weekly rows, then any others, keeping account order and the main Codex bucket first.
+Both providers show every returned quota window, and the panel grows by one row per account until it reaches 85% of the screen height, after which the quota area scrolls.
+The row height is an estimate; the quota list measures its content against the space it got, and the panel adds the difference and keeps it across refreshes, so the list does not scroll before that limit.
+The UI lists one row per account, Claude accounts, then Codex accounts, keeping account order; each row has a ring per window, 5-hour, then Weekly, then any others, with the main Codex bucket first.
 The parser retains the server's `limitName` for presentation.
 A missing 5-hour window is never inferred from the plan name; Plus, Pro, and future plans follow the account response.
 Provider headers and All weight each account's weekly percentage by its estimated weekly tokens; see [combined percentage](PRICING.md#combined-percentage).
@@ -69,6 +70,7 @@ A 30-minute background refresh covers quota resets, remote devices, and missed f
 The root SwiftUI view leaves the outer background to the native menu to avoid stacked glass borders.
 The quota card stays outside the scroll view so scrolling moves the rows without moving its concentric background.
 The scroll viewport fills the card, with separate content and indicator margins and a rounded clip so indicators do not cover account values.
+While the rows fit, the scroll view does not rubber-band, so the list stays still; it scrolls only past the 85% limit.
 
 ## Transcript parsing
 

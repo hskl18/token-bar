@@ -50,4 +50,40 @@ final class AccountTests: XCTestCase {
         XCTAssertTrue(snapshot.primaryCodexYields)
         XCTAssertEqual(snapshot.visibleCodexAccounts.map(\.id), ["/a", "/c"])
     }
+
+    // 2026-11-11: ~/.claude-z was renamed ~/.claude-h while ~/.claude-j held the same login; the renamed folder had
+    // no Keychain item yet, so the whole login read "Signed out." although ~/.claude-j was signed in.
+    func testALoginReadsWithTheFirstOfItsFoldersThatHoldsASignIn() throws {
+        let named = URL(fileURLWithPath: "/home/.claude-h"), alias = URL(fileURLWithPath: "/home/.claude-j")
+        let profile = ClaudeAccountProfile(id: "login", name: "Claude-h", configDirectory: named, aliases: [alias])
+        let locations = ClaudeSignInLocation.all(for: profile, primaryAliases: [])
+        XCTAssertEqual(locations, [
+            ClaudeSignInLocation(directory: named, keychainServices: [ClaudeAccountProfile.keychainService(for: named)]),
+            ClaudeSignInLocation(directory: alias, keychainServices: [ClaudeAccountProfile.keychainService(for: alias)]),
+        ])
+        func signedIn(_ tokens: [URL: String]) -> (ClaudeSignInLocation) throws -> String {
+            { try tokens[$0.directory] ?? { throw ClaudeClientError.credentialMissing }() }
+        }
+
+        XCTAssertEqual(try ClaudeSignInLocation.firstSignIn(in: locations, read: signedIn([alias: "j"])).location.directory, alias)
+        XCTAssertEqual(try ClaudeSignInLocation.firstSignIn(in: locations, read: signedIn([named: "h", alias: "j"])).token, "h")
+        XCTAssertThrowsError(try ClaudeSignInLocation.firstSignIn(in: locations) {
+            throw $0.directory == named ? ClaudeClientError.credentialUnreadable : ClaudeClientError.credentialMissing
+        }) { error in
+            guard case ClaudeClientError.credentialUnreadable = error else { return XCTFail("\(error)") }
+        }
+        // An expired sign-in elsewhere outranks a missing one, so starting a window can renew it.
+        XCTAssertThrowsError(try ClaudeSignInLocation.firstSignIn(in: locations) {
+            throw $0.directory == named ? ClaudeClientError.credentialMissing : ClaudeClientError.authenticationExpired
+        }) { error in
+            guard case ClaudeClientError.authenticationExpired = error else { return XCTFail("\(error)") }
+        }
+        XCTAssertEqual(ClaudeSignInLocation.all(for: nil, primaryAliases: [alias]), [
+            ClaudeSignInLocation(
+                directory: AccountSource.primaryDirectory(for: .claude),
+                keychainServices: ClaudeSignInLocation.primaryKeychainServices
+            ),
+            ClaudeSignInLocation(directory: alias, keychainServices: [ClaudeAccountProfile.keychainService(for: alias)]),
+        ])
+    }
 }

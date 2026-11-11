@@ -12,7 +12,7 @@ A native macOS menu bar monitor for Claude Code and OpenAI Codex.
 
 - 🟠 Claude quota windows and local token estimates
 - 🔵 Codex quota windows and account activity
-- 🟠🔵 Extra Claude and Codex accounts in their own quota rows
+- 🟠🔵 One quota row per Claude and Codex account, with a ring per window
 - ⚪ Capacity-weighted combined usage
 - 🟠 Last-known values when a provider becomes stale
 - 🔒 Local aggregation without raw transcript uploads
