@@ -26,13 +26,13 @@ enum PreviewScenario: String {
                 shortWindow: LimitWindow(
                     label: "5-hour window",
                     usedPercent: 46,
-                    windowMinutes: 5 * 60,
+                    windowMinutes: LimitWindow.sessionMinutes,
                     resetsAt: now.addingTimeInterval(2.2 * 60 * 60)
                 ),
                 longWindow: LimitWindow(
                     label: "All models",
                     usedPercent: 73,
-                    windowMinutes: 7 * 24 * 60,
+                    windowMinutes: LimitWindow.weeklyMinutes,
                     resetsAt: now.addingTimeInterval(31 * 60 * 60)
                 ),
                 extraWindows: [],
@@ -62,7 +62,7 @@ enum PreviewScenario: String {
                 longWindow: LimitWindow(
                     label: "7-day window",
                     usedPercent: 41,
-                    windowMinutes: 7 * 24 * 60,
+                    windowMinutes: LimitWindow.weeklyMinutes,
                     resetsAt: now.addingTimeInterval(5.8 * 24 * 60 * 60),
                     limitID: "codex"
                 ),
@@ -89,7 +89,7 @@ enum PreviewScenario: String {
 
         if self == .codexPlus || self == .bothPlus {
             snapshot.codex.shortWindow = LimitWindow(
-                label: "5-hour window", usedPercent: 62, windowMinutes: 300,
+                label: "5-hour window", usedPercent: 62, windowMinutes: LimitWindow.sessionMinutes,
                 resetsAt: now.addingTimeInterval(2.5 * 60 * 60), limitID: "codex"
             )
         }
@@ -102,11 +102,11 @@ enum PreviewScenario: String {
                 quota: ProviderSnapshot(
                     connected: true,
                     shortWindow: LimitWindow(
-                        label: "5-hour window", usedPercent: 18, windowMinutes: 300,
+                        label: "5-hour window", usedPercent: 18, windowMinutes: LimitWindow.sessionMinutes,
                         resetsAt: now.addingTimeInterval(3.6 * 60 * 60)
                     ),
                     longWindow: LimitWindow(
-                        label: "All models", usedPercent: 34, windowMinutes: 10080,
+                        label: "All models", usedPercent: 34, windowMinutes: LimitWindow.weeklyMinutes,
                         resetsAt: now.addingTimeInterval(4.5 * 24 * 60 * 60)
                     ),
                     extraWindows: [],
@@ -130,11 +130,11 @@ enum PreviewScenario: String {
                 quota: ProviderSnapshot(
                     connected: true,
                     shortWindow: LimitWindow(
-                        label: "5-hour window", usedPercent: 27, windowMinutes: 300,
+                        label: "5-hour window", usedPercent: 27, windowMinutes: LimitWindow.sessionMinutes,
                         resetsAt: now.addingTimeInterval(1.4 * 60 * 60), limitID: "codex"
                     ),
                     longWindow: LimitWindow(
-                        label: "7-day window", usedPercent: 22, windowMinutes: 10080,
+                        label: "7-day window", usedPercent: 22, windowMinutes: LimitWindow.weeklyMinutes,
                         resetsAt: now.addingTimeInterval(3.2 * 24 * 60 * 60), limitID: "codex"
                     ),
                     extraWindows: [],

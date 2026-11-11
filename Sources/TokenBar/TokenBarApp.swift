@@ -89,10 +89,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] snapshot in
                 // The publisher fires before the store holds the new value, so draw from the value it sends.
                 self?.updateStatusItems(snapshot)
-                self?.statusPanel?.updateContentSize(
-                    TokenBarLayout.panelSize(for: snapshot)
-                )
                 self?.scheduleNextClaudeWindowRefresh(for: snapshot)
+            }
+            .store(in: &cancellables)
+
+        // The window takes the same height as the panel inside it, estimate plus measured correction.
+        store.$snapshot.combineLatest(store.$panelHeightCorrection)
+            .sink { [weak self] snapshot, correction in
+                self?.statusPanel?.updateContentSize(TokenBarLayout.panelSize(for: snapshot, correction: correction))
             }
             .store(in: &cancellables)
 

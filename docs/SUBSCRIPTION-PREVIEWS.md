@@ -1,6 +1,6 @@
 # Subscription preview gallery
 
-Captured on October 11, 2026 on macOS 27.2 from the local app using `TOKENBAR_PREVIEW_STATE`.
+Captured on November 11, 2026 on macOS 27.2 from the local app using `TOKENBAR_PREVIEW_STATE`.
 These screenshots show synthetic usage data in the actual menu UI.
 The dollar values represent fixture cost estimates, not subscription prices, bills, or guaranteed included value.
 
@@ -35,7 +35,7 @@ The README uses this capture.
 
 Preview state: `both`.
 The overview combines the two providers.
-Claude's 5-hour row comes first, followed by the Claude and Codex Weekly rows.
+The Claude account row comes first, followed by the Codex account row, both under the shared `5h` and `Week` columns.
 
 ![Pro with Claude, using synthetic data](screenshots/subscriptions/both-pro.png)
 
@@ -49,7 +49,7 @@ The app omits the combined overview and Claude content when only Codex is connec
 ## Plus alone
 
 Preview state: `codex-plus`.
-This fixture adds a 5-hour window to the main Codex Weekly window.
+This fixture adds a 5-hour window to the main Codex Weekly window, shown as a `5h` ring beside `Week` in the same row.
 
 ![Plus alone, using synthetic data](screenshots/subscriptions/codex-plus.png)
 
@@ -84,14 +84,14 @@ The app opens the menu after the status item has settled into position.
 Launch the app without `TOKENBAR_PREVIEW_STATE` to return to normal account data.
 Dates and reset countdowns depend on capture time, so later screenshots need not match pixel for pixel.
 
-The capture fell on a Sunday, so each launch added `-AppleLocale 'en_US@fw=mon'` to start that process's week on Monday; otherwise This Week would equal Today.
+The capture fell on a Wednesday, so This Week and Today differ without a locale override; on a Sunday, add `-AppleLocale 'en_US@fw=mon'` to each launch so the week starts on Monday.
 A window-only capture renders the translucent menu as flat gray, so each image captures the screen under the open menu while a blue-purple wallpaper window hides other windows.
-A 24px rounded-corner mask then removes the menu's shadow.
+Each image is cropped to the 782-pixel panel, and a 24px rounded-corner mask then removes the menu's shadow.
 
 ## Verification
 
-The release build and all 21 tests passed before this gallery was published.
-We inspected all five menu windows: complete labels, the same spacing above the footer, and no unrelated provider content in single-provider scenarios.
+The release build and all 25 tests passed before this gallery was published.
+We inspected all five menu windows: complete labels, every account row visible without scrolling, rings under the shared column titles, and no unrelated provider content in single-provider scenarios.
 This records one local macOS run, not coverage of every supported OS, display size, or subscription account.
 
 Use `git status` and `git diff` for the current working-tree state; this gallery does not assert publication or deployment.

@@ -52,7 +52,24 @@ enum ActivityPeriod: Hashable {
     }
 }
 
+/// One row in an activity card's hover chart, newest last; under All, `segments` splits the cost by provider.
+struct PeriodUsage: Equatable {
+    struct Segment: Equatable {
+        let provider: ProviderScope
+        let usd: Double
+    }
+
+    let label: String
+    let tokens: Int64
+    let usd: Double?
+    let segments: [Segment]
+}
+
 struct LimitWindow: Codable, Hashable, Identifiable {
+    /// The 5-hour and Weekly windows Claude and Codex both report, in minutes.
+    static let sessionMinutes = 5 * 60
+    static let weeklyMinutes = 7 * 24 * 60
+
     var label: String
     var usedPercent: Double
     var windowMinutes: Int?
@@ -83,6 +100,8 @@ struct ProviderSnapshot: Codable, Hashable {
     var consecutiveRateLimits: Int? = nil
     var stale: Bool? = nil
     var weeklyResetCredits: Int? = nil
+    /// When each available weekly reset credit expires, nil for one that never does; nil when unknown.
+    var resetCreditExpiries: [Date?]? = nil
     var resetCreditsFetched: Bool? = nil
     var resetAccountID: String? = nil
     /// An expired sign-in on an account Token Bar never renews: its last reading stands, without a warning.
@@ -116,7 +135,7 @@ struct ProviderSnapshot: Codable, Hashable {
     var weeklyPercent: Double? {
         let windows = [longWindow, shortWindow].compactMap { $0 } + extraWindows
         guard let percent = windows.first(where: {
-            $0.windowMinutes == 7 * 24 * 60 && $0.limitID?.hasPrefix("claude:") != true
+            $0.windowMinutes == LimitWindow.weeklyMinutes && $0.limitID?.hasPrefix("claude:") != true
         })?.usedPercent, percent.isFinite else {
             return nil
         }

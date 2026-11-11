@@ -8,7 +8,8 @@ These are consumable opportunities to clear usage limits, separate from the next
 The [official app-server protocol](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt) returns `rateLimitResetCredits.availableCount` from `account/rateLimits/read`.
 The count belongs to the account selected by that child process's `CODEX_HOME`.
 It is authoritative even when the detail list is missing, empty, or shorter than the count.
-The installed CLI's generated schema confirms that `excludeResetCreditDetails: true` skips the extra detail lookup while retaining the count, so background polls keep that flag.
+The installed CLI's generated schema confirms that `excludeResetCreditDetails: true` skips the extra detail lookup while retaining the count, so polls keep that flag for a login whose last reading had no credits.
+A login that held credits drops it, and each available credit's `expiresAt` (Unix seconds, null when it never expires) gives its expiry; Codex CLI 0.167.0's schema was checked on November 8, 2026.
 A missing summary is unknown, rather than zero.
 
 Both local Codex configurations returned `availableCount: 2` during the read-only research.
@@ -22,6 +23,7 @@ Its request identifies the CLI platform and installed CLI version.
 This is an observed CLI protocol, rather than a documented public Anthropic API contract.
 
 Token Bar requests that block with its existing quota read and sums `resets_left` only for unpaused grants that have started, have not expired, and clear the main `seven_day` window.
+Each counted grant's `ends_at` is when its resets expire; a grant without one never does.
 Grants that only give back a model's weekly usage do not promise to reset the full weekly percentage to zero and are excluded.
 An explicit `ineligible_reason: no_grant` means zero.
 Missing or malformed data, unsupported surfaces, and other eligibility reasons remain unknown.
@@ -32,8 +34,9 @@ HTTP 429 never triggers that fallback and retains the existing cooldown.
 
 ## Display
 
-The main Weekly row places `Reset N` beside the scheduled reset countdown, aligned with the percentage above it.
+An account row places `Reset N` under the account's name when its main Weekly window has credits.
 Zero, unknown, and stale counts are hidden.
+Hovering over the button lists when the credits expire, soonest first, when the provider gave expiry details.
 The button opens an account-specific confirmation before using one reset.
 Session windows, model-specific weekly windows, activity estimates, and combined percentages keep their existing presentation and calculations.
 

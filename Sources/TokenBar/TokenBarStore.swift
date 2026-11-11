@@ -11,6 +11,8 @@ final class TokenBarStore: ObservableObject {
         }
     }
     @Published var isRefreshing = false
+    /// What the quota list measured the panel height estimate to be off by; the panel and its window add it.
+    @Published var panelHeightCorrection: CGFloat = 0
     @Published private(set) var isResettingQuota = false
     @Published private(set) var estimateFailures: [String: String] = [:]
 
@@ -117,6 +119,7 @@ final class TokenBarStore: ObservableObject {
         }
         saveSnapshot()
 
+        let primaryAliases = claudePrimaryAliases
         Task {
             defer {
                 isResettingQuota = false
@@ -124,7 +127,9 @@ final class TokenBarStore: ObservableObject {
             }
             do {
                 if provider == .claude {
-                    try await ClaudeClient().consumeWeeklyReset(profile: claudeProfile, expectedAccountID: accountID)
+                    try await ClaudeClient().consumeWeeklyReset(
+                        profile: claudeProfile, primaryAliases: isPrimary ? primaryAliases : [], expectedAccountID: accountID
+                    )
                 } else {
                     try await CodexAppServerClient().consumeWeeklyReset(codexHome: directory, expectedAccountID: accountID)
                 }
@@ -231,14 +236,21 @@ final class TokenBarStore: ObservableObject {
 
             let codexReadings = codexAccountsToRefresh.count + (shouldRefreshCodex ? 1 : 0) > 1
                 ? CodexQuotaReadings() : nil
+            // Only a login that held reset credits pays for the lookup of when they expire.
+            let codexCreditDetails = (snapshot.codex.weeklyResetCredits ?? 0) > 0
+            let codexCreditDetailIDs = Set((snapshot.additionalCodexAccounts ?? [])
+                .filter { ($0.quota.weeklyResetCredits ?? 0) > 0 }.map(\.id))
             async let codexResult: Result<CodexFetchResult, Error>? = shouldRefreshCodex
-                ? capture { try await CodexAppServerClient().fetch(readings: codexReadings) }
+                ? capture { try await CodexAppServerClient().fetch(readings: codexReadings, creditDetails: codexCreditDetails) }
                 : nil
+            let primaryAliases = claudePrimaryAliases
             async let claudeResult: Result<ProviderSnapshot, Error>? = shouldRefreshClaude
-                ? capture { try await ClaudeClient().fetch() }
+                ? capture { try await ClaudeClient().fetch(primaryAliases: primaryAliases) }
                 : nil
             async let additionalClaudeResults = fetchClaudeAccounts(claudeAccountsToRefresh)
-            async let additionalCodexResults = fetchCodexAccounts(codexAccountsToRefresh, readings: codexReadings)
+            async let additionalCodexResults = fetchCodexAccounts(
+                codexAccountsToRefresh, readings: codexReadings, creditDetailIDs: codexCreditDetailIDs
+            )
             async let claudeLedgerResult: ClaudeUsageLedger? = shouldScanClaude
                 ? ClaudeMixSampler(configDirectories: [claudeHome] + claudeDirectories).update() : nil
             let imageHomes = [codexHome] + codexProfiles.map(\.configDirectory)
@@ -804,6 +816,14 @@ final class TokenBarStore: ObservableObject {
         return total > 0 ? min(100, max(0, used / total)) : nil
     }
 
+    /// The estimate behind a quota row's main weekly window, keyed like `AppSnapshot.accountRows`.
+    func weeklyEstimate(
+        for provider: ProviderScope, account: String?, window: LimitWindow, in quota: ProviderSnapshot
+    ) -> WeeklyValueEstimate? {
+        guard window == weeklyWindow(in: quota) else { return nil }
+        return weeklyEstimates(for: provider).first { $0.account == account }?.estimate
+    }
+
     /// Current weekly estimates, one per confirmed login, keyed like `AppSnapshot.accountRows`.
     private func weeklyEstimates(for provider: ProviderScope) -> [(account: String?, estimate: WeeklyValueEstimate)] {
         switch provider {
@@ -856,15 +876,44 @@ final class TokenBarStore: ObservableObject {
         return estimate
     }
 
-    /// Hover text for an activity tile: numbers only, since docs/PRICING.md explains the method.
-    /// A tile with nothing to add stays silent.
+    /// Hover text under an activity tile's chart: numbers only, since docs/PRICING.md explains the method.
+    /// The Year card has no hover: its months are the Month card's chart.
     func activityHelp(for provider: ProviderScope, period: ActivityPeriod) -> String {
-        let interval = period.interval()
-        let months = period == .month || period == .year ? monthLines(for: provider) : []
-        return [accountLines(for: provider, in: interval), months]
-            .filter { !$0.isEmpty }
-            .map { $0.joined(separator: "\n") }
-            .joined(separator: "\n\n")
+        guard period != .year else { return "" }
+        return accountLines(for: provider, in: period.interval()).joined(separator: "\n")
+    }
+
+    /// An activity card's hover chart, oldest first: today and the seven days before it, this week and the
+    /// seven before it, or this year's months for Month. Empty for Year, which would repeat Month, and without usage.
+    func periodUsage(for provider: ProviderScope, period: ActivityPeriod) -> [PeriodUsage] {
+        let calendar = Calendar.current
+        let now = Date()
+        guard period != .year else { return [] }
+        let unit = period
+        let count = unit == .month ? calendar.component(.month, from: now) : 8
+        // Local history starts here, as in the mix samplers; earlier periods would read as unused.
+        let kept = min(ActivityPeriod.year.interval(at: now, calendar: calendar).start,
+                       ActivityPeriod.week.interval(at: now, calendar: calendar).start)
+        var intervals: [DateInterval] = []
+        var date = now
+        while intervals.count < count {
+            let interval = unit.interval(at: date, calendar: calendar)
+            guard interval.end > kept else { break }
+            intervals.insert(interval, at: 0)
+            date = interval.start.addingTimeInterval(-1)
+        }
+        let parts = provider == .overview ? [ProviderScope.claude, .codex] : [provider]
+        let rows = intervals.map { interval in
+            let total = totals(for: provider, in: interval)
+            let label = interval == intervals.last
+                ? (unit == .today ? "Today" : unit == .week ? "This week" : "This month")
+                : interval.start.formatted(unit == .today ? .dateTime.weekday(.abbreviated).month(.defaultDigits).day()
+                    : unit == .week ? .dateTime.month(.abbreviated).day() : .dateTime.month(.wide))
+            return PeriodUsage(label: label, tokens: total.tokens, usd: total.cost, segments: parts.map {
+                PeriodUsage.Segment(provider: $0, usd: totals(for: $0, in: interval).cost ?? 0)
+            })
+        }
+        return rows.contains { $0.tokens > 0 || ($0.usd ?? 0) > 0 } ? rows : []
     }
 
     // Claude history counts every Claude folder together, so only Codex logins and All's two providers split.
@@ -893,23 +942,6 @@ final class TokenBarStore: ObservableObject {
             }
             return lines
         }
-    }
-
-    /// This year's months with usage, newest first.
-    private func monthLines(for provider: ProviderScope) -> [String] {
-        let calendar = Calendar.current
-        let yearStart = ActivityPeriod.year.interval(calendar: calendar).start
-        var lines: [String] = []
-        var month = calendar.dateInterval(of: .month, for: Date())
-        while let interval = month, interval.start >= yearStart {
-            let totals = totals(for: provider, in: interval)
-            if totals.tokens > 0 || (totals.cost ?? 0) > 0 {
-                lines.append("\(interval.start.formatted(.dateTime.month(.wide))): \(usd(totals.cost))"
-                    + " · \(compactTokens(totals.tokens)) tokens")
-            }
-            month = calendar.dateInterval(of: .month, for: interval.start.addingTimeInterval(-1))
-        }
-        return lines.count > 1 ? lines : []
     }
 
     private func totals(for provider: ProviderScope, in interval: DateInterval) -> (tokens: Int64, cost: Double?) {
@@ -1404,7 +1436,7 @@ final class TokenBarStore: ObservableObject {
 
     private func weeklyWindow(in provider: ProviderSnapshot) -> LimitWindow? {
         allWindows(in: provider)
-            .first { $0.windowMinutes == 7 * 24 * 60 && $0.limitID?.hasPrefix("claude:") != true }
+            .first { $0.windowMinutes == LimitWindow.weeklyMinutes && $0.limitID?.hasPrefix("claude:") != true }
     }
 
     // A falling percentage within one reset window means earlier spend cannot be attributed to it.
@@ -1473,7 +1505,9 @@ final class TokenBarStore: ObservableObject {
                     ? snapshot.claude : snapshot.additionalClaudeAccounts?.first { $0.id == profile?.id }?.quota
                 guard let quota, hasIdleSessionWindow(quota) || quota.error == Self.renewingMessage else { continue }
                 do {
-                    if try await ClaudeWindowStarter.shared.start(profile: profile) {
+                    if try await ClaudeWindowStarter.shared.start(
+                        profile: profile, primaryAliases: profile == nil ? claudePrimaryAliases : []
+                    ) {
                         started.insert((profile?.configDirectory ?? AccountSource.primaryDirectory(for: .claude)).path)
                     }
                 } catch {
@@ -1713,11 +1747,14 @@ private func fetchClaudeAccounts(
 }
 
 private func fetchCodexAccounts(
-    _ profiles: [CodexAccountProfile], readings: CodexQuotaReadings?
+    _ profiles: [CodexAccountProfile], readings: CodexQuotaReadings?, creditDetailIDs: Set<String>
 ) async -> [(String, Result<CodexFetchResult, Error>)] {
     await fetchAccountProfiles(profiles) { profile in
         (profile.id, await capture {
-            try await CodexAppServerClient().fetch(codexHome: profile.configDirectory, readings: readings)
+            try await CodexAppServerClient().fetch(
+                codexHome: profile.configDirectory, readings: readings,
+                creditDetails: creditDetailIDs.contains(profile.id)
+            )
         })
     }
 }

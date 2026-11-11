@@ -12,7 +12,7 @@ The allowance has no reset time, so Token Bar uses the start of the next UTC mon
 Token Bar reads the existing Claude Code OAuth credential from macOS Keychain through `/usr/bin/security`.
 It does not ask the user to paste or store another token.
 An extra account in a `~/.claude-*` folder uses that folder's own Keychain entry, as Claude Code does for `CLAUDE_CONFIG_DIR`.
-Folders signed in to the same login show one row, read with the first folder's credential.
+Folders signed in to the same login show one row, read with the first of them that holds a sign-in and still names that login, so a renamed folder without a Keychain entry does not sign the row out; an expired sign-in there is renewed by starting a window in that folder.
 When `~/.claude` has no credential, `~/.claude.json` names no login, and another Claude folder is signed in, `~/.claude` only holds shared history, so Token Bar shows no row or error for it.
 
 The endpoint can return HTTP 429 after repeated requests.

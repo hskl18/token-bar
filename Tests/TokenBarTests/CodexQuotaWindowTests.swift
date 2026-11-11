@@ -47,13 +47,17 @@ final class CodexQuotaWindowTests: XCTestCase {
         XCTAssertEqual(provider.displayWindows.first?.limitID, "new-model")
     }
 
-    func testPanelGrowsAndShrinksWithReturnedWindows() {
-        var plus = PreviewScenario.codexPlus.snapshot
+    func testPanelGrowsWithAccountsNotWindows() {
         let pro = PreviewScenario.codex.snapshot
-        XCTAssertEqual(TokenBarLayout.panelHeight(for: plus), TokenBarLayout.panelHeight(for: pro) + 81)
-        plus.codex.shortWindow = nil
-        XCTAssertEqual(TokenBarLayout.panelSize(for: plus), TokenBarLayout.panelSize(for: pro))
+        // Plus returns one more window for the same login, which becomes one more ring in the same row.
+        XCTAssertEqual(TokenBarLayout.panelHeight(for: PreviewScenario.codexPlus.snapshot), TokenBarLayout.panelHeight(for: pro))
         XCTAssertEqual(TokenBarLayout.panelHeight(for: PreviewScenario.bothPlus.snapshot),
-                       TokenBarLayout.panelHeight(for: PreviewScenario.both.snapshot) + 81)
+                       TokenBarLayout.panelHeight(for: PreviewScenario.both.snapshot))
+        var twoLogins = pro
+        twoLogins.additionalCodexAccounts = [CodexAccountSnapshot(
+            id: "/b", name: "Codex-b", sourceDirectory: "/b", accountID: "another login", quota: pro.codex
+        )]
+        XCTAssertEqual(TokenBarLayout.panelHeight(for: twoLogins),
+                       TokenBarLayout.panelHeight(for: pro) + TokenBarLayout.quotaRowHeight)
     }
 }
