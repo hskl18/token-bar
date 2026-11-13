@@ -84,7 +84,7 @@ The app opens the menu after the status item has settled into position.
 Launch the app without `TOKENBAR_PREVIEW_STATE` to return to normal account data.
 Dates and reset countdowns depend on capture time, so later screenshots need not match pixel for pixel.
 
-The capture fell on a Wednesday, so This Week and Today differ without a locale override; on a Sunday, add `-AppleLocale 'en_US@fw=mon'` to each launch so the week starts on Monday.
+The capture fell on a Wednesday, so Weekly and Today differ without a locale override; on a Sunday, add `-AppleLocale 'en_US@fw=mon'` to each launch so the week starts on Monday.
 A window-only capture renders the translucent menu as flat gray, so each image captures the screen under the open menu while a blue-purple wallpaper window hides other windows.
 Each image is cropped to the 782-pixel panel, and a 24px rounded-corner mask then removes the menu's shadow.
 

@@ -3,6 +3,7 @@ import AppKit
 enum QuotaBarColor {
     static let claude = NSColor(srgbRed: 0xE5 / 255, green: 0x39 / 255, blue: 0x35 / 255, alpha: 1)
     static let codex = NSColor(srgbRed: 0x2F / 255, green: 0x6E / 255, blue: 0xDB / 255, alpha: 1)
+    static let kiro = NSColor(srgbRed: 0x79 / 255, green: 0x3D / 255, blue: 0xE0 / 255, alpha: 1)
 
     static func at(_ percent: Double, base: NSColor) -> NSColor {
         let percent = min(100, max(0, percent))

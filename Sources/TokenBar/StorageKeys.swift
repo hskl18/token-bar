@@ -8,6 +8,8 @@ enum StorageKeys {
     static let priceCache = "tokenbar.price-cache.v7"
     static let priceHistory = "tokenbar.price-history.v1"
     static let imageGenerationUsage = "tokenbar.image-generation-usage.v2"
+    /// Account folders turned off in Settings.
+    static let hiddenAccounts = "tokenbar.hidden-accounts.v1"
 
     static let active: Set<String> = [
         snapshot,
@@ -19,6 +21,7 @@ enum StorageKeys {
         priceCache,
         priceHistory,
         imageGenerationUsage,
+        hiddenAccounts,
     ]
 
     static let profileLedgers = [claudeWindowLedger, codexWindowLedger, codexUsageLedger]

@@ -13,11 +13,13 @@ A native macOS menu bar monitor for Claude Code and OpenAI Codex.
 - 🟠 Claude quota windows and local token estimates
 - 🔵 Codex quota windows and account activity
 - 🟠🔵 One quota row per Claude and Codex account, with a ring per window
+- 🟣 Kiro and Kiro CLI credits, with their bonus credits, as rows below Codex
+- ⚙️ Settings to turn off any detected account's row
 - ⚪ Capacity-weighted combined usage
 - 🟠 Last-known values when a provider becomes stale
 - 🔒 Local aggregation without raw transcript uploads
 - 🧊 Liquid Glass on macOS 26 with a Material fallback
-- 🔁 Weekly reset credits you can spend from the menu
+- 🔁 Weekly reset credits, and Claude's Fable resets, you can spend from the menu
 - ⏱️ Automatic starts for idle Claude 5-hour windows
 - 🧭 `cl` and `cdx` launchers that start each session on the login whose quota should go first
 
@@ -33,6 +35,7 @@ Some features rely on behavior the providers do not document, and some may confl
 
 - Token Bar reads your Claude Code sign-in from the macOS Keychain and uses it to call Claude's undocumented usage endpoint, the one Claude Code's `/usage` reads.
   It spends Claude reset credits through the same undocumented protocol.
+- It reads the sign-in token Kiro or the Kiro CLI saved and calls the usage-limits endpoint they call; it never renews that token.
 - It starts idle Claude 5-hour windows by running the installed `claude` CLI, and each start counts against your usage limits.
 - The `cl` and `cdx` launchers choose among several of your own logins by the quota each has left.
   Anthropic sets its limits for ordinary, individual use, and both providers forbid sharing a login with anyone else.

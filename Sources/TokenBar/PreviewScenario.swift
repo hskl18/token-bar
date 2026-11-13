@@ -97,7 +97,7 @@ enum PreviewScenario: String {
         if self == .multiAccount {
             snapshot.additionalClaudeAccounts = [ClaudeAccountSnapshot(
                 id: "preview-claude-work",
-                name: "Claude-work",
+                name: "claude-work",
                 sourceDirectory: "~/.claude-work",
                 quota: ProviderSnapshot(
                     connected: true,
@@ -124,7 +124,7 @@ enum PreviewScenario: String {
             )]
             snapshot.additionalCodexAccounts = [CodexAccountSnapshot(
                 id: "~/.codex-work",
-                name: "Codex-work",
+                name: "codex-work",
                 sourceDirectory: "~/.codex-work",
                 accountID: "preview-codex-work",
                 quota: ProviderSnapshot(

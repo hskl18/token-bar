@@ -76,6 +76,8 @@ struct LimitWindow: Codable, Hashable, Identifiable {
     var resetsAt: Date?
     var limitID: String? = nil
     var limitName: String? = nil
+    /// A credit pool's amounts for its hover, such as `381 of 4,000 credits`.
+    var amounts: String? = nil
 
     var quotaDisplayName: String {
         guard let limitID, limitID != "codex" else { return "Codex" }
@@ -102,6 +104,9 @@ struct ProviderSnapshot: Codable, Hashable {
     var weeklyResetCredits: Int? = nil
     /// When each available weekly reset credit expires, nil for one that never does; nil when unknown.
     var resetCreditExpiries: [Date?]? = nil
+    /// Claude's Fable resets, each giving back to the weekly limit what Fable used, and when each expires.
+    var fableResetCredits: Int? = nil
+    var fableResetCreditExpiries: [Date?]? = nil
     var resetCreditsFetched: Bool? = nil
     var resetAccountID: String? = nil
     /// An expired sign-in on an account Token Bar never renews: its last reading stands, without a warning.
@@ -523,6 +528,10 @@ struct AppSnapshot: Codable, Hashable {
     var codex: ProviderSnapshot
     var additionalCodexAccounts: [CodexAccountSnapshot]? = nil
     var codexAccountID: String? = nil
+    /// The Kiro IDE's and Kiro CLI's credits, shown as quota rows after Codex.
+    var kiroAccounts: [KiroAccountSnapshot]? = nil
+    /// Account folders turned off in Settings, mirrored from `StorageKeys.hiddenAccounts`.
+    var hiddenAccounts: Set<String>? = nil
     var tokenActivity: TokenActivity
     var claudeTokenActivity: TokenActivity?
     var claudeCostLedger: CostLedger?
@@ -569,9 +578,9 @@ struct AppSnapshot: Codable, Hashable {
     func accountRows(for provider: ProviderScope) -> [(account: String?, quota: ProviderSnapshot)] {
         switch provider {
         case .claude:
-            [(claudeAccountID, claude)] + (additionalClaudeAccounts ?? []).map { ($0.id, $0.quota) }
+            (showsPrimaryClaude ? [(claudeAccountID, claude)] : []) + visibleClaudeAccounts.map { ($0.id, $0.quota) }
         case .codex:
-            (primaryCodexYields ? [] : [(codexAccountID, codex)])
+            (showsPrimaryCodex ? [(codexAccountID, codex)] : [])
                 + visibleCodexAccounts.map { ($0.accountID ?? $0.id, $0.quota) }
         case .overview:
             []
@@ -591,17 +600,49 @@ struct AppSnapshot: Codable, Hashable {
         }
     }
 
+    /// Whether Settings turned off this account folder: it gets no quota row and no quota requests,
+    /// while its local history still counts in the activity totals.
+    func isHidden(_ path: String) -> Bool { hiddenAccounts?.contains(path) == true }
+
+    var showsPrimaryClaude: Bool { !isHidden(AccountSource.primaryDirectory(for: .claude).path) }
+
+    var showsPrimaryCodex: Bool { !primaryCodexYields && !isHidden(AccountSource.primaryDirectory(for: .codex).path) }
+
+    var visibleClaudeAccounts: [ClaudeAccountSnapshot] {
+        (additionalClaudeAccounts ?? []).filter { !isHidden($0.sourceDirectory) }
+    }
+
     // A stale primary yields its quota rows to a fresh reading of the same account.
     var primaryCodexYields: Bool {
         codex.isStale && codexAccountID != nil && (additionalCodexAccounts ?? []).contains {
-            $0.accountID == codexAccountID && !$0.quota.isStale
+            $0.accountID == codexAccountID && !$0.quota.isStale && !isHidden($0.sourceDirectory)
         }
+    }
+
+    /// One Kiro row per account: the IDE and the CLI signed in to the same one share the first's row,
+    /// with the reading that is neither idle nor stale, else the newer one; a sign-in never read ranks last.
+    var visibleKiroAccounts: [KiroAccountSnapshot] {
+        var rows: [KiroAccountSnapshot] = []
+        for account in kiroAccounts ?? [] {
+            guard let id = account.accountID, let index = rows.firstIndex(where: { $0.accountID == id }) else {
+                rows.append(account)
+                continue
+            }
+            let shown = rows[index].quota
+            func rank(_ quota: ProviderSnapshot) -> (Int, Date) {
+                (quota.lastSuccessAt == nil ? 0 : quota.idle == true || quota.isStale ? 1 : 2, quota.lastSuccessAt ?? .distantPast)
+            }
+            if rank(account.quota) > rank(shown) {
+                rows[index].quota = account.quota
+            }
+        }
+        return rows
     }
 
     var visibleCodexAccounts: [CodexAccountSnapshot] {
         // One row per account, preferring a fresh reading.
-        let accounts = additionalCodexAccounts ?? []
-        var seen = Set(primaryCodexYields ? [] : [codexAccountID].compactMap { $0 })
+        let accounts = (additionalCodexAccounts ?? []).filter { !isHidden($0.sourceDirectory) }
+        var seen = Set(showsPrimaryCodex ? [codexAccountID].compactMap { $0 } : [])
         let shown = Set((accounts.filter { !$0.quota.isStale } + accounts.filter(\.quota.isStale))
             .filter { seen.insert($0.accountID ?? $0.id).inserted }
             .map(\.id))
