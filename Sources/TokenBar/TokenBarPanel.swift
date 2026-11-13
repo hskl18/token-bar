@@ -107,7 +107,9 @@ private struct ProviderMark: View {
 
 struct RootView: View {
     @EnvironmentObject private var store: TokenBarStore
-    let onWeeklyReset: (ProviderScope, String, String) -> Void
+    /// Provider, account folder, account name, and whether to spend a Fable reset instead of a full weekly one.
+    let onWeeklyReset: (ProviderScope, String, String, Bool) -> Void
+    let onSettings: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -116,7 +118,7 @@ struct RootView: View {
                 .padding(.top, 8)
                 .padding(.bottom, 4)
 
-            FooterBar()
+            FooterBar(onSettings: onSettings)
         }
         .frame(
             width: TokenBarLayout.panelWidth,
@@ -128,7 +130,7 @@ struct RootView: View {
 
 private struct UnifiedUsagePage: View {
     @EnvironmentObject private var store: TokenBarStore
-    let onWeeklyReset: (ProviderScope, String, String) -> Void
+    let onWeeklyReset: (ProviderScope, String, String, Bool) -> Void
     @State private var listContentHeight: CGFloat = 0
     @State private var listViewportHeight: CGFloat = 0
 
@@ -171,7 +173,16 @@ private struct UnifiedUsagePage: View {
                 }
                 return ($0.windowMinutes ?? Int.max) < ($1.windowMinutes ?? Int.max)
             }
-            for window in groupedWindows {
+            let creditsCurrent = !quota.isStale && quota.idle != true && quota.resetCreditsFetched == true
+            // A Claude model's own weekly limit, such as Fable's, gets no ring when a Week ring can list it in its hover.
+            let hasWeek = groupedWindows.contains { $0.limitID == "claude" && $0.windowMinutes == LimitWindow.weeklyMinutes }
+            let modelWeeks = name == "Claude" && hasWeek ? groupedWindows.filter {
+                $0.windowMinutes == LimitWindow.weeklyMinutes && $0.limitID != "claude"
+            } : []
+            let modelLines = modelWeeks.map { "\($0.limitName ?? $0.label): \(Int($0.usedPercent.rounded()))% used" }
+            for window in groupedWindows where !modelWeeks.contains(window) {
+                let isWeek = window.limitID == "claude" && window.windowMinutes == LimitWindow.weeklyMinutes
+                let idleSince = quota.idle == true && window.resetsAt.map({ $0 > Date() }) ?? true ? quota.lastSuccessAt : nil
                 let detail = name == "Codex" && window.quotaDisplayName != "Codex" ? window.quotaDisplayName
                     : name == "Claude" && window.windowMinutes == LimitWindow.weeklyMinutes ? window.limitName : nil
                 let provider = detail.map { title + " · " + $0 } ?? title
@@ -179,39 +190,45 @@ private struct UnifiedUsagePage: View {
                     provider: provider, account: title, detail: detail,
                     scope: name, source: source, window: window, barBase: color,
                     // Past its reset an idle reading is out of date, so the row says "Reset due" like any other.
-                    status: quota.idle == true && window.resetsAt.map({ $0 > Date() }) ?? true
-                        ? quota.lastSuccessAt.map { "Idle since \(readingTime($0))" } : nil,
-                    weeklyResetCredits: !quota.isStale && quota.idle != true && quota.resetCreditsFetched == true
-                        ? quota.weeklyResetCredits : nil,
+                    // Kiro has no header to mark a failed refresh, so its row says so.
+                    status: idleSince.map { _ in "Idle" } ?? (name == "Kiro" && quota.error != nil ? "Out of date" : nil),
+                    statusHelp: idleSince.map { "Idle since \(readingTime($0))\n" + idleReason(name) }
+                        ?? quota.error.map { error in quota.lastSuccessAt.map { "\(error) As of \(readingTime($0))." } ?? error },
+                    weeklyResetCredits: creditsCurrent ? quota.weeklyResetCredits : nil,
                     resetCreditExpiries: quota.resetCreditExpiries,
-                    help: windowHelp(window, readAt: quota.lastSuccessAt, estimate: store.weeklyEstimate(
+                    fableResetCredits: creditsCurrent ? quota.fableResetCredits : nil,
+                    fableResetCreditExpiries: quota.fableResetCreditExpiries,
+                    help: ([windowHelp(window, readAt: quota.lastSuccessAt, estimate: name == "Kiro" ? nil : store.weeklyEstimate(
                         for: name == "Claude" ? .claude : .codex, account: key, window: window, in: quota
-                    ))
+                    ))] + (isWeek ? modelLines : [])).filter { !$0.isEmpty }.joined(separator: "\n")
                 ))
             }
             if groupedWindows.isEmpty && showUnavailable {
                 items.append(NamedWindow(
                     provider: title, account: title, detail: nil,
                     scope: name, source: source, window: nil, barBase: color,
-                    status: store.isRefreshing ? "Connecting…" : "Quota unavailable"
+                    // Kiro's errors are short, so its row names the reason; an idle Kiro has no reading yet.
+                    status: store.isRefreshing ? "Connecting…" : quota.idle == true ? "Idle"
+                        : name == "Kiro" ? quota.error ?? "Quota unavailable" : "Quota unavailable",
+                    statusHelp: quota.idle == true ? idleReason(name) : quota.error
                 ))
             }
         }
-        if presentation.showsClaude {
+        if presentation.showsClaude && store.snapshot.showsPrimaryClaude {
             append(
-                title: "Claude", source: "~/.claude", name: "Claude", key: store.snapshot.claudeAccountID,
+                title: "claude", source: "~/.claude", name: "Claude", key: store.snapshot.claudeAccountID,
                 quota: store.snapshot.claude, color: QuotaBarColor.claude
             )
         }
-        for account in store.snapshot.additionalClaudeAccounts ?? [] {
+        for account in store.snapshot.visibleClaudeAccounts {
             append(
                 title: account.name, source: account.sourceDirectory,
                 name: "Claude", key: account.id, quota: account.quota, color: QuotaBarColor.claude, showUnavailable: true
             )
         }
-        if presentation.showsCodex && !store.snapshot.primaryCodexYields {
+        if presentation.showsCodex && store.snapshot.showsPrimaryCodex {
             append(
-                title: "Codex", source: "~/.codex", name: "Codex", key: store.snapshot.codexAccountID,
+                title: "codex", source: "~/.codex", name: "Codex", key: store.snapshot.codexAccountID,
                 quota: store.snapshot.codex, color: QuotaBarColor.codex
             )
         }
@@ -219,6 +236,12 @@ private struct UnifiedUsagePage: View {
             append(
                 title: account.name, source: account.sourceDirectory,
                 name: "Codex", key: account.accountID ?? account.id, quota: account.quota, color: QuotaBarColor.codex, showUnavailable: true
+            )
+        }
+        for account in store.snapshot.visibleKiroAccounts {
+            append(
+                title: account.name, source: account.id,
+                name: "Kiro", key: nil, quota: account.quota, color: QuotaBarColor.kiro, showUnavailable: true
             )
         }
         return quotaAccountRows(items, provider: { $0.scope }, account: { $0.source })
@@ -261,8 +284,8 @@ private struct UnifiedUsagePage: View {
                                     nameWidth: nameWidth,
                                     diameter: diameter,
                                     resetEnabled: !store.isRefreshing && !store.isResettingQuota,
-                                    onReset: { item in
-                                        onWeeklyReset(item.scope == "Claude" ? .claude : .codex, item.source, item.provider)
+                                    onReset: { item, fable in
+                                        onWeeklyReset(item.scope == "Claude" ? .claude : .codex, item.source, item.provider, fable)
                                     }
                                 )
                                 if index < rows.count - 1 {
@@ -387,45 +410,51 @@ private struct AccountRow: View {
     let nameWidth: CGFloat
     let diameter: CGFloat
     let resetEnabled: Bool
-    let onReset: (NamedWindow) -> Void
+    /// The window, and whether to spend a Fable reset instead of a full weekly one.
+    let onReset: (NamedWindow, Bool) -> Void
 
-    /// The main Weekly window, the one a reset credit clears.
+    /// The main Weekly window, the one a reset credit clears or a Fable reset gives back to.
     private var resettable: NamedWindow? {
         windows.first {
-            ($0.weeklyResetCredits ?? 0) > 0 && $0.window?.windowMinutes == LimitWindow.weeklyMinutes
+            ($0.weeklyResetCredits ?? 0) + ($0.fableResetCredits ?? 0) > 0
+                && $0.window?.windowMinutes == LimitWindow.weeklyMinutes
                 && ($0.window?.limitID == nil || ["claude", "codex"].contains($0.window?.limitID ?? ""))
         }
     }
 
     var body: some View {
         HStack(alignment: .center, spacing: QuotaRing.nameSpacing) {
-            VStack(alignment: .leading, spacing: 5) {
+            // Every row centers its name, status and reset capsule on the name column's middle, so they share one axis.
+            VStack(alignment: .center, spacing: 5) {
                 Text(windows[0].account)
                     .font(.system(size: TokenBarType.primary, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
-                if let status = windows.lazy.compactMap(\.status).first {
+                if let item = windows.first(where: { $0.status != nil }), let status = item.status {
                     Text(status)
                         .font(.system(size: TokenBarType.secondary, weight: .medium))
                         .foregroundStyle(Palette.secondary)
                         .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .hoverHelp(item.statusHelp ?? "")
                 }
-                if let item = resettable, let credits = item.weeklyResetCredits {
-                    Button { onReset(item) } label: {
-                        Text("Reset \(credits)")
-                            .monospacedDigit()
-                            .fixedSize()
-                            .padding(.horizontal, 6)
-                            .background(Palette.secondary.opacity(0.12), in: Capsule())
+                if let item = resettable {
+                    let full = item.weeklyResetCredits ?? 0
+                    // One capsule, `2 Reset | 3`: full weekly resets, then Claude's Fable resets after the divider.
+                    HStack(spacing: 0) {
+                        resetSegment(item, "\(full) Reset", credits: full, fable: false, expiries: item.resetCreditExpiries)
+                        if let fable = item.fableResetCredits, fable > 0 {
+                            Divider().frame(height: 10)
+                            resetSegment(item, "\(fable)", credits: fable, fable: true, expiries: item.fableResetCreditExpiries)
+                        }
                     }
-                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .background(Palette.secondary.opacity(0.12), in: Capsule())
                     .font(.system(size: TokenBarType.secondary, weight: .medium))
                     .foregroundStyle(Palette.secondary)
-                    .disabled(!resetEnabled)
-                    .hoverHelp(resetCreditHelp(credits, expiries: item.resetCreditExpiries))
                 }
             }
-            .frame(width: nameWidth, alignment: .leading)
+            .frame(width: nameWidth, alignment: .center)
             // Equal columns share what the names leave, so the rings spread out instead of crowding right.
             HStack(spacing: 0) {
                 ForEach(columns, id: \.key) { column in
@@ -440,6 +469,21 @@ private struct AccountRow: View {
                 }
             }
         }
+    }
+
+    private func resetSegment(
+        _ item: NamedWindow, _ title: String, credits: Int, fable: Bool, expiries: [Date?]?
+    ) -> some View {
+        Button { onReset(item, fable) } label: {
+            Text(title)
+                .monospacedDigit()
+                .padding(.horizontal, 6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        // `0 Reset` beside Fable resets has nothing to spend.
+        .disabled(!resetEnabled || credits == 0)
+        .hoverHelp(credits > 0 ? resetCreditHelp(credits, fable: fable, expiries: expiries) : "")
     }
 }
 
@@ -488,12 +532,14 @@ private struct QuotaRing: View {
                     )
                     .rotationEffect(.degrees(-90))
             }
-            Text("\(Int(window.usedPercent.rounded()))%")
-                .font(.system(size: TokenBarType.secondary, weight: .bold, design: .rounded))
-                .monospacedDigit()
-                .minimumScaleFactor(0.7)
-                .lineLimit(1)
-                .padding(.horizontal, 6)
+            TimelineView(.everyMinute) { context in
+                Text(ringCenterText(window, now: context.date))
+                    .font(.system(size: TokenBarType.secondary, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .minimumScaleFactor(0.7)
+                    .lineLimit(1)
+                    .padding(.horizontal, 6)
+            }
         }
         .frame(width: diameter, height: diameter)
         .contentShape(Rectangle())
@@ -508,26 +554,15 @@ private struct ActivitySection: View {
     @EnvironmentObject private var store: TokenBarStore
     let provider: ProviderScope
 
-    @ViewBuilder
     var body: some View {
-        if provider == .claude {
-            HStack(spacing: 8) {
-                activityTile(label: "TODAY", period: .today)
-                activityTile(label: "THIS WEEK", period: .week)
-                activityTile(label: "THIS MONTH", period: .month)
-            }
-        } else {
-            LazyVGrid(columns: activityColumns, spacing: 8) {
-                activityTile(label: "TODAY", period: .today)
-                activityTile(label: "THIS WEEK", period: .week)
-                activityTile(label: "THIS MONTH", period: .month)
-                activityTile(label: "THIS YEAR", period: .year)
+        HStack(spacing: 8) {
+            activityTile(label: "TODAY", period: .today)
+            activityTile(label: "WEEKLY", period: .week)
+            activityTile(label: "MONTHLY", period: .month)
+            if provider != .claude {
+                activityTile(label: "YEARLY", period: .year)
             }
         }
-    }
-
-    private var activityColumns: [GridItem] {
-        [GridItem(.flexible(), spacing: 8), GridItem(.flexible())]
     }
 
     private func activityTile(label: String, period: ActivityPeriod) -> some View {
@@ -535,7 +570,9 @@ private struct ActivitySection: View {
         return ActivityTile(
             label: label,
             tokens: tokens,
-            estimatedCost: store.estimatedCost(for: provider, period: period)
+            estimatedCost: store.estimatedCost(for: provider, period: period),
+            // Four tiles share the row Claude's three do, so they give their text more of the width.
+            horizontalInset: provider == .claude ? AppleGeometry.contentInset : 8
         )
         .hoverHelp(store.activityHelp(for: provider, period: period), chart: store.periodUsage(for: provider, period: period))
     }
@@ -557,13 +594,13 @@ private struct CombinedActivitySection: View {
             )
             .hoverHelp(store.activityHelp(for: .overview, period: .today), chart: store.periodUsage(for: .overview, period: .today))
             ActivityTile(
-                label: "THIS WEEK",
+                label: "WEEKLY",
                 tokens: week.tokens,
                 estimatedCost: week.estimatedCost
             )
             .hoverHelp(store.activityHelp(for: .overview, period: .week), chart: store.periodUsage(for: .overview, period: .week))
             ActivityTile(
-                label: "THIS MONTH",
+                label: "MONTHLY",
                 tokens: month.tokens,
                 estimatedCost: month.estimatedCost
             )
@@ -594,13 +631,17 @@ private struct ActivityTile: View {
     let label: String
     let tokens: Int64
     let estimatedCost: Double?
+    var horizontalInset = AppleGeometry.contentInset
 
     var body: some View {
+        // Each line shrinks rather than truncates or wraps when a narrow tile cannot fit it, such as a yearly cost.
         VStack(alignment: .leading, spacing: 5) {
             Text(label)
                 .font(.system(size: TokenBarType.caption, weight: .bold))
                 .tracking(0.8)
                 .foregroundStyle(Palette.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
             if let estimatedCost {
                 Text(estimatedCost.formatted(
                     .currency(code: "USD").precision(.fractionLength(2))
@@ -608,6 +649,7 @@ private struct ActivityTile: View {
                     .font(.system(size: TokenBarType.primary, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .lineLimit(1)
+                    .minimumScaleFactor(0.7)
             } else {
                 Text("--")
                     .font(.system(size: TokenBarType.primary, weight: .bold, design: .rounded))
@@ -618,9 +660,10 @@ private struct ActivityTile: View {
                 .font(.system(size: TokenBarType.caption, weight: .medium))
                 .foregroundStyle(Palette.secondary)
                 .lineLimit(1)
+                .minimumScaleFactor(0.7)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, AppleGeometry.contentInset)
+        .padding(.horizontal, horizontalInset)
         .padding(.vertical, 10)
         .appleConcentricSurface(
             fill: Palette.surface.opacity(0.76),
@@ -632,22 +675,32 @@ private struct ActivityTile: View {
 
 private struct FooterBar: View {
     @EnvironmentObject private var store: TokenBarStore
+    let onSettings: () -> Void
 
     var body: some View {
         let errors = errorDetails
         HStack(spacing: 12) {
-            Button {
-                if store.isRefreshing {
-                    store.cancelRefresh()
-                } else {
-                    store.refresh()
+            HStack(spacing: 6) {
+                Button(action: onSettings) {
+                    footerIcon("gearshape")
                 }
-            } label: {
-                footerIcon(store.isRefreshing ? "xmark" : "arrow.clockwise")
+                .buttonStyle(.plain)
+                .hoverHelp("Settings")
+                .accessibilityLabel("Settings")
+
+                Button {
+                    if store.isRefreshing {
+                        store.cancelRefresh()
+                    } else {
+                        store.refresh()
+                    }
+                } label: {
+                    footerIcon(store.isRefreshing ? "xmark" : "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .hoverHelp(store.isRefreshing ? "Cancel refresh" : "Refresh now")
+                .accessibilityLabel(store.isRefreshing ? "Cancel refresh" : "Refresh now")
             }
-            .buttonStyle(.plain)
-            .hoverHelp(store.isRefreshing ? "Cancel refresh" : "Refresh now")
-            .accessibilityLabel(store.isRefreshing ? "Cancel refresh" : "Refresh now")
 
             Spacer()
 
@@ -693,10 +746,9 @@ private struct FooterBar: View {
 
     private var errorDetails: String {
         let snapshot = store.snapshot
-        let profiles: [(String, ProviderSnapshot)] = [
-            ("Claude", snapshot.claude),
-            ("Codex", snapshot.codex),
-        ] + (snapshot.additionalClaudeAccounts ?? []).map {
+        let profiles: [(String, ProviderSnapshot)] = (snapshot.showsPrimaryClaude ? [("claude", snapshot.claude)] : [])
+            + (snapshot.isHidden(AccountSource.primaryDirectory(for: .codex).path) ? [] : [("codex", snapshot.codex)])
+            + snapshot.visibleClaudeAccounts.map {
             ($0.name, $0.quota)
         } + snapshot.visibleCodexAccounts.map {
             ($0.name, $0.quota)
@@ -845,15 +897,16 @@ struct QuotaColumn: Hashable {
     static func == (lhs: QuotaColumn, rhs: QuotaColumn) -> Bool { lhs.key == rhs.key }
     func hash(into hasher: inout Hasher) { hasher.combine(key) }
 
-    /// `5h` and `Week` lead, then the other columns in the order they first appear.
-    var rank: Int { key == "5h" ? 0 : key == "Week" ? 1 : 2 }
+    /// `5h` and `Week` lead, then Codex's other columns in the order they first appear, then `Credit`.
+    var rank: Int { key == "5h" ? 0 : key == "Week" ? 1 : key == "Credit" ? 3 : 2 }
 }
 
 extension QuotaColumn {
     init(window: LimitWindow, detail: String?, scope: String) {
         let title = ringLabel(window, detail: detail)
+        // A credit pool without a length, such as Claude's usage credits or Kiro's credits, shares `Credit`.
         let main = detail == nil
-            && [LimitWindow.sessionMinutes, LimitWindow.weeklyMinutes].contains(window.windowMinutes)
+            && [LimitWindow.sessionMinutes, LimitWindow.weeklyMinutes, nil].contains(window.windowMinutes)
         self.init(
             key: main ? title : "\(scope)|\(window.limitID ?? "")|\(window.windowMinutes.map(String.init) ?? "")",
             title: title
@@ -879,7 +932,7 @@ func quotaAccountRows<Window>(
 
 private struct NamedWindow: Identifiable {
     let provider: String
-    /// The account folder's title, such as `Claude-work`, and what tells this window apart in its row.
+    /// The account folder's title, such as `claude-work`, and what tells this window apart in its row.
     let account: String
     let detail: String?
     let scope: String
@@ -887,8 +940,12 @@ private struct NamedWindow: Identifiable {
     let window: LimitWindow?
     let barBase: NSColor
     let status: String?
+    /// The status's hover, such as when an idle account was last read.
+    var statusHelp: String? = nil
     var weeklyResetCredits: Int? = nil
     var resetCreditExpiries: [Date?]? = nil
+    var fableResetCredits: Int? = nil
+    var fableResetCreditExpiries: [Date?]? = nil
     var help = ""
 
     var id: String { scope + source + (window?.id ?? "unavailable") }
@@ -911,7 +968,7 @@ private func windowHelp(_ window: LimitWindow, readAt: Date?, estimate: WeeklyVa
     let used = window.usedPercent
     var lines: [String] = []
     if let estimate {
-        lines.append("\(Int(used.rounded()))% so far: \(compactTokens(estimate.observedTokens)) tokens"
+        lines.append("So far: \(compactTokens(estimate.observedTokens)) tokens"
             + " · \(usdText(estimate.observedCostUSD))")
         if used < 100 {
             lines.append("100% ≈ \(compactTokens(estimate.equivalentTokens)) tokens · \(usdText(estimate.equivalentValueUSD))")
@@ -933,25 +990,30 @@ private func windowHelp(_ window: LimitWindow, readAt: Date?, estimate: WeeklyVa
     return lines.joined(separator: "\n")
 }
 
-/// The Reset button's hover: what it spends and when the credits expire, soonest first.
-private func resetCreditHelp(_ count: Int, expiries: [Date?]?) -> String {
+/// A reset button's hover: what it spends and when the credits expire, soonest first.
+private func resetCreditHelp(_ count: Int, fable: Bool, expiries: [Date?]?) -> String {
     let groups = Dictionary(grouping: (expiries ?? []).filter { $0.map { $0 > Date() } ?? true }, by: { $0 })
         .sorted { ($0.key ?? .distantFuture) < ($1.key ?? .distantFuture) }
-    return (["Use 1 of \(count) weekly reset credits"] + groups.map { date, credits in
+    let spends = fable ? ["Use 1 of \(count) Fable resets", "Returns what Fable used to your weekly limit"]
+        : ["Use 1 of \(count) weekly reset credits"]
+    return (spends + groups.map { date, credits in
         "\(credits.count) " + (date.map { "\(credits.count == 1 ? "expires" : "expire") \(readingTime($0))" } ?? "never expire"
             + (credits.count == 1 ? "s" : ""))
     }).joined(separator: "\n")
 }
 
-/// The name column's width: the widest account title or `Reset N` badge, capped so a long folder name shrinks
+/// The name column's width: the widest account title or `2 Reset | 3` capsule, capped so a long folder name shrinks
 /// instead of squeezing the rings, and so every ring column keeps room for its ring.
 private func accountNameWidth(_ rows: [[NamedWindow]], columns: Int, diameter: CGFloat) -> CGFloat {
     let title = NSFont.systemFont(ofSize: TokenBarType.primary, weight: .semibold)
     let badge = NSFont.monospacedDigitSystemFont(ofSize: TokenBarType.secondary, weight: .medium)
     func width(_ text: String, _ font: NSFont) -> CGFloat { (text as NSString).size(withAttributes: [.font: font]).width }
     let widest = rows.map { row in
-        max(width(row[0].account, title),
-            row.compactMap(\.weeklyResetCredits).max().map { width("Reset \($0)", badge) + 12 } ?? 0)
+        let full = row.compactMap(\.weeklyResetCredits).max()
+        let fable = row.compactMap(\.fableResetCredits).max().flatMap { $0 > 0 ? $0 : nil }
+        let capsule = (full ?? 0) == 0 && fable == nil ? 0
+            : width("\(full ?? 0) Reset", badge) + 12 + (fable.map { width("\($0)", badge) + 13 } ?? 0)
+        return max(width(row[0].account, title), capsule)
     }.max() ?? 0
     let roomForName = QuotaList.cardWidth - QuotaRing.nameSpacing - CGFloat(columns) * (diameter + 4)
     return min(ceil(widest) + 2, 140, max(48, roomForName))
@@ -976,9 +1038,29 @@ func ringLabel(_ window: LimitWindow, detail: String?) -> String {
     }
 }
 
-/// A ring has no line of its own for the reset countdown, so its hover starts with it.
+/// Why an idle row shows its last reading: Kiro renews its own sign-in when it next runs; Claude's lapsed for good.
+private func idleReason(_ provider: String) -> String {
+    provider == "Kiro" ? "Kiro has not run since; it renews its sign-in when it next does" : "Sign-in expired; showing its last reading"
+}
+
+/// A ring's center shows the time to its reset, so its hover starts with the used percentage and exact countdown.
 private func ringHelp(_ window: LimitWindow, help: String) -> String {
-    [resetText(window.resetsAt), help].filter { !$0.isEmpty }.joined(separator: "\n")
+    ["\(Int(window.usedPercent.rounded()))% used", window.amounts ?? "", resetText(window.resetsAt), help]
+        .filter { !$0.isEmpty }.joined(separator: "\n")
+}
+
+/// A ring's center: the time left until its window resets, such as `45m`, `1.6h` or `3.2d`, with one decimal
+/// below 10 so it fits the ring; the used percentage when no reset is ahead.
+func ringCenterText(_ window: LimitWindow, now: Date) -> String {
+    guard let reset = window.resetsAt, reset > now else { return "\(Int(window.usedPercent.rounded()))%" }
+    // Rounded up, so a window resetting within the minute reads `1m`, never `0m`.
+    let minutes = (reset.timeIntervalSince(now) / 60).rounded(.up)
+    if minutes < 60 { return "\(Int(minutes))m" }
+    // Each unit is chosen after rounding, so 9.97 hours reads `10h`, not `10.0h`, and 23.9 hours `1.0d`, not `24h`.
+    func rounded(_ value: Double) -> Double { value < 9.95 ? (value * 10).rounded() / 10 : value.rounded() }
+    func amount(_ value: Double) -> String { value < 9.95 ? String(format: "%.1f", value) : "\(Int(value.rounded()))" }
+    let hours = minutes / 60
+    return rounded(hours) < 24 ? amount(hours) + "h" : amount(hours / 24) + "d"
 }
 
 private func compactWindowLabel(_ window: LimitWindow) -> String {

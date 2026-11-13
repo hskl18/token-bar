@@ -1,6 +1,6 @@
 # Weekly reset credits
 
-Researched on October 22, 2026 against Codex CLI 0.163.0 and Claude Code 2.1.309.
+Researched on October 22, 2026 against Codex CLI 0.163.0 and Claude Code 2.1.309; Claude's Fable resets on November 12, 2026 against Claude Code 2.1.323.
 These are consumable opportunities to clear usage limits, separate from the next scheduled reset time.
 
 ## Codex
@@ -24,7 +24,8 @@ This is an observed CLI protocol, rather than a documented public Anthropic API 
 
 Token Bar requests that block with its existing quota read and sums `resets_left` only for unpaused grants that have started, have not expired, and clear the main `seven_day` window.
 Each counted grant's `ends_at` is when its resets expire; a grant without one never does.
-Grants that only give back a model's weekly usage do not promise to reset the full weekly percentage to zero and are excluded.
+A grant with `gives_back_weekly: true` is a Fable reset, which the CLI describes as returning what Fable used to the weekly limit.
+It clears `five_hour` and `seven_day_overage_included` but not `seven_day`, so Token Bar counts Fable resets separately, by the same start, expiry and pause rules.
 An explicit `ineligible_reason: no_grant` means zero.
 Missing or malformed data, unsupported surfaces, and other eligibility reasons remain unknown.
 The primary Claude account returned `no_grant` during research.
@@ -34,11 +35,11 @@ HTTP 429 never triggers that fallback and retains the existing cooldown.
 
 ## Display
 
-An account row places `Reset N` under the account's name when its main Weekly window has credits.
+An account row places one capsule under the account's name when its main Weekly window has credits: `2 Reset` for full weekly resets, then, after a divider, the number of Fable resets, as in `2 Reset | 3`.
 Zero, unknown, and stale counts are hidden.
-Hovering over the button lists when the credits expire, soonest first, when the provider gave expiry details.
-The button opens an account-specific confirmation before using one reset.
-Session windows, model-specific weekly windows, activity estimates, and combined percentages keep their existing presentation and calculations.
+Hovering over either part lists when its credits expire, soonest first, when the provider gave expiry details.
+Each part opens an account-specific confirmation before using one reset of its kind; `0 Reset` beside Fable resets is disabled.
+Session windows, activity estimates, and combined percentages keep their existing presentation and calculations.
 
 ## Redemption
 
@@ -49,7 +50,7 @@ The client checks that the account in the selected directory still matches the a
 
 Codex uses the documented `account/rateLimitResetCredit/consume` method with a fresh idempotency key.
 It uses one runtime and does not retry an uncertain spend through another runtime.
-Claude rereads the grants, selects an active full weekly reset, and uses the installed CLI's `reset_rate_limits` request shape with its grant and request identifiers.
+Claude rereads the grants, selects the first active grant of the chosen kind, and uses the installed CLI's `reset_rate_limits` request shape with its grant and request identifiers.
 Neither provider's spend request is automatically retried.
 
 Before sending a spend, Token Bar invalidates the saved reset-count freshness so a quit cannot restore a usable old button.

@@ -12,11 +12,11 @@ enum TokenBarLayout {
     /// The account rows the quota list shows.
     static func quotaRows(for snapshot: AppSnapshot) -> Int {
         let presentation = snapshot.presentation
-        let claudeRows = (presentation.showsClaude && !snapshot.claude.displayWindows.isEmpty ? 1 : 0)
-            + (snapshot.additionalClaudeAccounts ?? []).count
-        let codexRows = (presentation.showsCodex && !snapshot.primaryCodexYields && !snapshot.codex.displayWindows.isEmpty ? 1 : 0)
+        let claudeRows = (presentation.showsClaude && snapshot.showsPrimaryClaude && !snapshot.claude.displayWindows.isEmpty ? 1 : 0)
+            + snapshot.visibleClaudeAccounts.count
+        let codexRows = (presentation.showsCodex && snapshot.showsPrimaryCodex && !snapshot.codex.displayWindows.isEmpty ? 1 : 0)
             + snapshot.visibleCodexAccounts.count
-        return claudeRows + codexRows
+        return claudeRows + codexRows + snapshot.visibleKiroAccounts.count
     }
 
     static func panelHeight(for snapshot: AppSnapshot) -> CGFloat {
@@ -47,10 +47,11 @@ enum TokenBarLayout {
             190
         case .claudeOnly:
             331
+        // Measured with Codex's activity tiles in two rows, less the 80 points (a 72-point tile row and its gap) one row saves.
         case .codexOnly:
-            335
+            255
         case .both:
-            728
+            648
         }
     }
 

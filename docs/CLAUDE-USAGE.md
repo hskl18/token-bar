@@ -26,7 +26,7 @@ Opening the menu does not bypass that cooldown.
 A credential whose saved expiry has passed counts as an expired sign-in without a request, since Anthropic answers repeated 401s with 429.
 After HTTP 401, Token Bar rereads the account's credential in case Claude Code already renewed it, and retries once with a changed token.
 Claude Code renews a sign-in whenever it runs, so an account with a 5-hour limit and Weekly usage below 100% (or a Weekly reset time that has passed) renews through its next [window start](#starting-5-hour-windows).
-An account without a 5-hour limit, such as a usage-credit Enterprise plan, gets no message: its row keeps the last reading as "Idle since <time>", without a warning, until Claude Code runs in its folder.
+An account without a 5-hour limit, such as a usage-credit Enterprise plan, gets no message: its row keeps the last reading and says "Idle", with the reading's time on hover and without a warning, until Claude Code runs in its folder.
 When Anthropic rejects a refresh token, Claude Code empties the stored tokens, and Token Bar reports that account as signed out.
 HTTP 403 and 429 never start the CLI.
 Token Bar looks for `claude` on `PATH` and in `~/.local/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`, so Finder launches find common installations.
@@ -75,8 +75,8 @@ It does not copy raw transcript lines.
 Claude Code can remove old session files according to its cleanup configuration.
 The remaining files may cover only part of the calendar year.
 
-Token Bar shows Today, This Week, and This Month from the available local history.
-It hides Claude This Year and All This Year because an incomplete local range cannot represent account-wide annual usage.
+Token Bar shows Today, Weekly, and Monthly from the available local history.
+It hides Claude Yearly and All Yearly because an incomplete local range cannot represent account-wide annual usage.
 
 Claude Desktop session metadata does not provide a dependable token time series.
 Token Bar does not use Claude Desktop as a second history source.

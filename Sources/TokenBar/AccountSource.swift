@@ -6,10 +6,10 @@ struct AccountSource: Hashable {
 
     var url: URL { URL(fileURLWithPath: directory, isDirectory: true) }
 
+    /// The folder's name as written, without its leading dot, such as `claude-work`.
     static func title(for directory: URL) -> String {
         let name = directory.lastPathComponent.drop(while: { $0 == "." })
-        guard let first = name.first else { return "Account" }
-        return String(first).uppercased() + name.dropFirst()
+        return name.isEmpty ? "account" : String(name)
     }
 
     static func titles(for directories: [URL]) -> [String: String] {

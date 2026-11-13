@@ -14,6 +14,8 @@ final class TokenBarStore: ObservableObject {
     /// What the quota list measured the panel height estimate to be off by; the panel and its window add it.
     @Published var panelHeightCorrection: CGFloat = 0
     @Published private(set) var isResettingQuota = false
+    /// Every account folder Settings can turn on or off, primary folders first.
+    @Published private(set) var settingsAccounts: [AccountSource] = []
     @Published private(set) var estimateFailures: [String: String] = [:]
 
     // The Claude usage endpoint throttles for up to an hour, and Claude Code's own /usage spends the same budget.
@@ -49,6 +51,7 @@ final class TokenBarStore: ObservableObject {
             snapshot = previewScenario.snapshot
         } else {
             loadSnapshot()
+            snapshot.hiddenAccounts = Set(UserDefaults.standard.stringArray(forKey: StorageKeys.hiddenAccounts) ?? [])
             if syncAccountProfiles() { saveSnapshot() }
         }
     }
@@ -76,7 +79,21 @@ final class TokenBarStore: ObservableObject {
         refresh(force: false)
     }
 
-    func confirmWeeklyReset(provider: ProviderScope, source: String, name: String) {
+    /// Turns an account folder's quota row and quota requests on or off, from Settings.
+    func setAccount(_ path: String, shown: Bool) {
+        guard previewScenario == nil else { return }
+        var hidden = snapshot.hiddenAccounts ?? []
+        if shown { hidden.remove(path) } else { hidden.insert(path) }
+        UserDefaults.standard.set(hidden.sorted(), forKey: StorageKeys.hiddenAccounts)
+        snapshot.hiddenAccounts = hidden
+        syncAccountProfiles()
+        saveSnapshot()
+        // A refresh already running picks the account up next time instead.
+        if shown { refresh(force: false, accounts: [path]) }
+    }
+
+    /// `fable` spends one of Claude's Fable resets instead of a full weekly one.
+    func confirmWeeklyReset(provider: ProviderScope, source: String, name: String, fable: Bool = false) {
         guard previewScenario == nil, provider != .overview, !isRefreshing, !isResettingQuota else { return }
         let directory = URL(fileURLWithPath: (source as NSString).expandingTildeInPath).standardizedFileURL
         let isPrimary = directory == AccountSource.primaryDirectory(for: provider)
@@ -98,9 +115,11 @@ final class TokenBarStore: ObservableObject {
         isResettingQuota = true
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Reset \(name)?"
-        alert.informativeText = "Use one reset credit for this account? This cannot be undone.\n\n\(directory.path)"
-        alert.addButton(withTitle: "Use 1 reset")
+        alert.messageText = fable ? "Use a Fable reset on \(name)?" : "Reset \(name)?"
+        alert.informativeText = (fable
+            ? "Give back to this account's weekly limit what Fable used? This cannot be undone."
+            : "Use one reset credit for this account? This cannot be undone.") + "\n\n\(directory.path)"
+        alert.addButton(withTitle: fable ? "Use 1 Fable reset" : "Use 1 reset")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else {
             isResettingQuota = false
@@ -128,7 +147,8 @@ final class TokenBarStore: ObservableObject {
             do {
                 if provider == .claude {
                     try await ClaudeClient().consumeWeeklyReset(
-                        profile: claudeProfile, primaryAliases: isPrimary ? primaryAliases : [], expectedAccountID: accountID
+                        profile: claudeProfile, primaryAliases: isPrimary ? primaryAliases : [], expectedAccountID: accountID,
+                        fable: fable
                     )
                 } else {
                     try await CodexAppServerClient().consumeWeeklyReset(codexHome: directory, expectedAccountID: accountID)
@@ -173,20 +193,21 @@ final class TokenBarStore: ObservableObject {
         let codexHome = AccountSource.primaryDirectory(for: .codex)
         let scanCodex = includes(.codex, codexHome)
         let scanClaude = ([claudeHome] + claudePrimaryAliases).contains { includes(.claude, $0) }
-        let shouldRefreshCodex = scanCodex
+        let shouldRefreshCodex = scanCodex && !snapshot.isHidden(codexHome.path)
             && shouldAttempt(snapshot.codex, force: force, at: attemptedAt)
-        let shouldRefreshClaude = scanClaude
+        let shouldRefreshClaude = scanClaude && !snapshot.isHidden(claudeHome.path)
             && shouldAttempt(snapshot.claude, force: force, at: attemptedAt)
         let claudeAccountsToRefresh = claudeProfiles.filter { profile in
             let quota = snapshot.additionalClaudeAccounts?
                 .first(where: { $0.id == profile.id })?.quota ?? .empty
             return ([profile.configDirectory] + profile.aliases).contains { includes(.claude, $0) }
-                && shouldAttempt(quota, force: force, at: attemptedAt)
+                && !snapshot.isHidden(profile.configDirectory.path) && shouldAttempt(quota, force: force, at: attemptedAt)
         }
         let codexAccountsToRefresh = codexProfiles.filter { profile in
             let quota = snapshot.additionalCodexAccounts?
                 .first(where: { $0.id == profile.id })?.quota ?? .empty
-            return includes(.codex, profile.configDirectory) && shouldAttempt(quota, force: force, at: attemptedAt)
+            return includes(.codex, profile.configDirectory) && !snapshot.isHidden(profile.configDirectory.path)
+                && shouldAttempt(quota, force: force, at: attemptedAt)
         }
         let shouldScanCodex = scanCodex && (scanLocal || shouldRefreshCodex)
         let codexProfilesToScan = codexProfiles.filter { profile in
@@ -195,7 +216,11 @@ final class TokenBarStore: ObservableObject {
         }
         let shouldScanClaude = ([claudeHome] + claudeDirectories).contains { includes(.claude, $0) }
             && (scanLocal || shouldRefreshClaude || !claudeAccountsToRefresh.isEmpty)
-        guard shouldScanCodex || shouldScanClaude
+        // Kiro has no local activity to watch, so only a refresh not narrowed to Claude or Codex reads it.
+        let kiroAccountsToRefresh = providers == nil ? (snapshot.kiroAccounts ?? []).filter {
+            (accounts?.contains($0.id) ?? true) && shouldAttempt($0.quota, force: force, at: attemptedAt)
+        } : []
+        guard shouldScanCodex || shouldScanClaude || !kiroAccountsToRefresh.isEmpty
                 || !claudeAccountsToRefresh.isEmpty || !codexProfilesToScan.isEmpty
         else {
             if profilesChanged { saveSnapshot() }
@@ -206,6 +231,7 @@ final class TokenBarStore: ObservableObject {
             + codexAccountsToRefresh.map(\.configDirectory)).map(\.path))
         if shouldRefreshCodex { attempted.insert(codexHome.path) }
         if shouldRefreshClaude { attempted.insert(claudeHome.path) }
+        attempted.formUnion(kiroAccountsToRefresh.map(\.id))
 
         var attemptingSnapshot = snapshot
         if shouldRefreshCodex { attemptingSnapshot.codex.lastAttemptAt = attemptedAt }
@@ -218,6 +244,11 @@ final class TokenBarStore: ObservableObject {
         for profile in codexAccountsToRefresh {
             if let index = attemptingSnapshot.additionalCodexAccounts?.firstIndex(where: { $0.id == profile.id }) {
                 attemptingSnapshot.additionalCodexAccounts?[index].quota.lastAttemptAt = attemptedAt
+            }
+        }
+        for account in kiroAccountsToRefresh {
+            if let index = attemptingSnapshot.kiroAccounts?.firstIndex(where: { $0.id == account.id }) {
+                attemptingSnapshot.kiroAccounts?[index].quota.lastAttemptAt = attemptedAt
             }
         }
         snapshot = attemptingSnapshot
@@ -251,22 +282,60 @@ final class TokenBarStore: ObservableObject {
             async let additionalCodexResults = fetchCodexAccounts(
                 codexAccountsToRefresh, readings: codexReadings, creditDetailIDs: codexCreditDetailIDs
             )
+            let kiroSources = KiroSource.detected.filter { source in kiroAccountsToRefresh.contains { $0.id == source.path } }
+            async let kiroResults = fetchAccountProfiles(kiroSources) { source in
+                (source.path, await capture { try await KiroClient().fetch(source) })
+            }
             async let claudeLedgerResult: ClaudeUsageLedger? = shouldScanClaude
                 ? ClaudeMixSampler(configDirectories: [claudeHome] + claudeDirectories).update() : nil
             let imageHomes = [codexHome] + codexProfiles.map(\.configDirectory)
             async let imageUsageResult: ImageGenerationUsage? = shouldScanCodex || !codexProfilesToScan.isEmpty
                 ? ImageGenerationSampler().update(codexHomes: imageHomes) : nil
 
-            let (codex, claude, additionalClaude, additionalCodex, claudeLedger, imageUsage) = await (
+            let (codex, claude, additionalClaude, additionalCodex, claudeLedger, imageUsage, kiro) = await (
                 codexResult,
                 claudeResult,
                 additionalClaudeResults,
                 additionalCodexResults,
                 claudeLedgerResult,
-                imageUsageResult
+                imageUsageResult,
+                kiroResults
             )
             guard !Task.isCancelled, refreshGeneration == generation else { return }
             if let imageUsage { snapshot.imageGenerationUsage = imageUsage }
+            for (id, result) in kiro {
+                guard let index = snapshot.kiroAccounts?.firstIndex(where: { $0.id == id }),
+                      var quota = snapshot.kiroAccounts?[index].quota else { continue }
+                switch result {
+                // The IDE's saved state can be older than Token Bar's own last reading, which then stands.
+                case let .success((reading, _)) where reading.lastSuccessAt.map({ $0 <= (quota.lastSuccessAt ?? .distantPast) }) == true:
+                    quota.lastAttemptAt = attemptedAt
+                    quota.error = nil
+                    quota.stale = false
+                    quota.nextAllowedRefreshAt = nil
+                    if attemptedAt.timeIntervalSince(quota.lastSuccessAt ?? .distantPast) > 60 * 60 { quota.idle = true }
+                case let .success((reading, accountID)):
+                    let readAt = reading.lastSuccessAt
+                    quota = reading
+                    recordSuccess(&quota, at: attemptedAt)
+                    if let accountID { snapshot.kiroAccounts?[index].accountID = accountID }
+                    // A reading from the IDE's saved state is as old as Kiro's last check, and over an hour means Kiro is idle.
+                    if let readAt {
+                        quota.lastSuccessAt = readAt
+                        if attemptedAt.timeIntervalSince(readAt) > 60 * 60 { quota.idle = true }
+                    }
+                case let .failure(ClaudeClientError.authenticationExpired):
+                    // Kiro renews its own sign-in when it next needs it, so a lapsed token only means it is not in use.
+                    quota.lastAttemptAt = attemptedAt
+                    quota.idle = true
+                    quota.error = nil
+                    quota.stale = false
+                    quota.nextAllowedRefreshAt = nil
+                case let .failure(error):
+                    recordFailure(error, in: &quota, at: attemptedAt)
+                }
+                snapshot.kiroAccounts?[index].quota = quota
+            }
             let catalog = PriceCatalog()
 
             var officialCodexActivity: TokenActivity?
@@ -598,8 +667,8 @@ final class TokenBarStore: ObservableObject {
     /// One line per stale account behind a provider's header: its name, what failed, and when its reading is from.
     func staleDetails(_ provider: ProviderScope) -> String? {
         let accounts: [(name: String, quota: ProviderSnapshot)] = provider == .claude
-            ? [("Claude", snapshot.claude)] + (snapshot.additionalClaudeAccounts ?? []).map { ($0.name, $0.quota) }
-            : (snapshot.primaryCodexYields ? [] : [("Codex", snapshot.codex)])
+            ? (snapshot.showsPrimaryClaude ? [("claude", snapshot.claude)] : []) + snapshot.visibleClaudeAccounts.map { ($0.name, $0.quota) }
+            : (snapshot.showsPrimaryCodex ? [("codex", snapshot.codex)] : [])
                 + snapshot.visibleCodexAccounts.map { ($0.name, $0.quota) }
         let lines = accounts.filter { $0.quota.isStale }.map { name, quota in
             let reading = quota.lastSuccessAt.map { " As of \(readingTime($0))." } ?? ""
@@ -642,7 +711,7 @@ final class TokenBarStore: ObservableObject {
     // and logins no longer signed in contribute their local history.
     private var codexUsage: [CodexUsage] {
         if let codexActivityCache { return codexActivityCache }
-        let accounts = [(id: snapshot.codexAccountID ?? "primary", name: "Codex", activity: snapshot.tokenActivity,
+        let accounts = [(id: snapshot.codexAccountID ?? "primary", name: "codex", activity: snapshot.tokenActivity,
                          ledger: snapshot.codexCostLedger, date: snapshot.codexActivityLastSuccessAt ?? .distantPast)]
             + (snapshot.additionalCodexAccounts ?? []).compactMap { account in
                 guard let id = account.accountID else { return nil }
@@ -650,7 +719,7 @@ final class TokenBarStore: ObservableObject {
                         account.activityLastSuccessAt ?? .distantPast)
             }
         // A login signed in from several folders shows under the name its quota row uses.
-        let rowNames = Set(snapshot.visibleCodexAccounts.map(\.name) + (snapshot.primaryCodexYields ? [] : ["Codex"]))
+        let rowNames = Set(snapshot.visibleCodexAccounts.map(\.name) + (snapshot.showsPrimaryCodex ? ["codex"] : []))
         let usage: [CodexUsage] = Dictionary(grouping: accounts, by: \.id).values.map { readings in
             let activity = readings.max { $0.date < $1.date }?.activity ?? .empty
             let ledger = readings.compactMap(\.ledger).max {
@@ -963,10 +1032,10 @@ final class TokenBarStore: ObservableObject {
         let estimates = weeklyEstimates(for: provider)
         // The panel lists a primary only with data and every extra account, as here.
         let primary: [(key: String?, name: String, quota: ProviderSnapshot, reason: String?)] = provider == .claude
-            ? [(snapshot.claudeAccountID, "Claude", snapshot.claude, snapshot.claudeWeeklyValueError)]
-            : snapshot.primaryCodexYields ? [] : [(snapshot.codexAccountID, "Codex", snapshot.codex, snapshot.codexWeeklyValueError)]
+            ? (snapshot.showsPrimaryClaude ? [(snapshot.claudeAccountID, "claude", snapshot.claude, snapshot.claudeWeeklyValueError)] : [])
+            : snapshot.showsPrimaryCodex ? [(snapshot.codexAccountID, "codex", snapshot.codex, snapshot.codexWeeklyValueError)] : []
         let extras: [(key: String?, name: String, quota: ProviderSnapshot, reason: String?)] = provider == .claude
-            ? (snapshot.additionalClaudeAccounts ?? []).map { ($0.id, $0.name, $0.quota, nil) }
+            ? snapshot.visibleClaudeAccounts.map { ($0.id, $0.name, $0.quota, nil) }
             : snapshot.visibleCodexAccounts.map { ($0.accountID ?? $0.id, $0.name, $0.quota, nil) }
         return (primary.filter { $0.quota.hasDisplayableData } + extras).map { row in
             guard row.quota.hasDisplayableData else {
@@ -1500,6 +1569,7 @@ final class TokenBarStore: ObservableObject {
             var started = Set<String>()
             for profile in profiles {
                 if let id = profile?.id, !claudeProfiles.contains(where: { $0.id == id }) { continue }
+                if snapshot.isHidden((profile?.configDirectory ?? AccountSource.primaryDirectory(for: .claude)).path) { continue }
                 // A refresh during an earlier start may have changed this account, so the start is checked again.
                 let quota = profile == nil
                     ? snapshot.claude : snapshot.additionalClaudeAccounts?.first { $0.id == profile?.id }?.quota
@@ -1612,7 +1682,18 @@ final class TokenBarStore: ObservableObject {
             return sources.filter { $0.provider == provider && seen.insert($0.directory).inserted }.map(\.url)
         }
         claudeDirectories = directories(for: .claude)
-        (claudeProfiles, claudePrimaryAliases) = ClaudeAccountProfile.discover(in: claudeDirectories, primaryID: claudeID)
+        // With the primary turned off, folders signed in to its login get rows of their own instead of sharing its row.
+        // A login's first folder names its row, so checked folders go first: a login hides only when all its folders do.
+        (claudeProfiles, claudePrimaryAliases) = ClaudeAccountProfile.discover(
+            in: claudeDirectories.filter { !snapshot.isHidden($0.path) } + claudeDirectories.filter { snapshot.isHidden($0.path) },
+            primaryID: snapshot.showsPrimaryClaude ? claudeID : nil
+        )
+        func existing(_ provider: ProviderScope) -> [URL] {
+            let primary = AccountSource.primaryDirectory(for: provider)
+            return FileManager.default.fileExists(atPath: primary.path) ? [primary] : []
+        }
+        settingsAccounts = (existing(.claude) + claudeDirectories).map { AccountSource(provider: .claude, directory: $0.path) }
+            + (existing(.codex) + directories(for: .codex)).map { AccountSource(provider: .codex, directory: $0.path) }
         let previousClaude = snapshot.additionalClaudeAccounts ?? []
         let claudeAccounts = claudeProfiles.map { profile in
             let cached = previousClaude.first(where: { $0.id == profile.id })
@@ -1643,9 +1724,20 @@ final class TokenBarStore: ObservableObject {
             )
         }
         next.additionalCodexAccounts = codexAccounts.isEmpty ? nil : codexAccounts
+        // Kiro keeps no local history here, so a turned-off Kiro sign-in is simply left out.
+        let kiroAccounts = KiroSource.detected.filter { !snapshot.isHidden($0.path) }.map { source in
+            let cached = snapshot.kiroAccounts?.first { $0.id == source.path }
+            let accountID = source.localAccountID ?? cached?.accountID
+            // A sign-in now naming another Kiro user must not keep the previous user's credits.
+            return KiroAccountSnapshot(
+                id: source.path, name: source.name,
+                quota: accountID == cached?.accountID ? cached?.quota ?? .empty : .empty, accountID: accountID
+            )
+        }
+        next.kiroAccounts = kiroAccounts.isEmpty ? nil : kiroAccounts
         // Usage warnings are keyed by account name, so drop those of folders that are gone or renamed.
         let usageWarnings = Set(codexAccounts.flatMap { ["\($0.name) usage", "\($0.name) local records"] }
-            + ["Codex local records"])
+            + [AccountSource.title(for: AccountSource.primaryDirectory(for: .codex)) + " local records"])
         estimateFailures = estimateFailures.filter {
             (!$0.key.hasSuffix(" usage") && !$0.key.hasSuffix(" local records")) || usageWarnings.contains($0.key)
         }
@@ -1653,6 +1745,7 @@ final class TokenBarStore: ObservableObject {
         guard next.claudeAccountID != snapshot.claudeAccountID
                 || next.additionalClaudeAccounts != snapshot.additionalClaudeAccounts
                 || next.additionalCodexAccounts != snapshot.additionalCodexAccounts
+                || next.kiroAccounts != snapshot.kiroAccounts
         else { return false }
         snapshot = next
         return true

@@ -143,12 +143,14 @@ struct ClaudeClient {
             snapshot.resetAccountID = accountID
         } else {
             snapshot.weeklyResetCredits = nil
+            snapshot.fableResetCredits = nil
         }
         return snapshot
     }
 
+    /// `fable` spends a Fable reset instead of a full weekly one.
     func consumeWeeklyReset(
-        profile: ClaudeAccountProfile?, primaryAliases: [URL] = [], expectedAccountID: String
+        profile: ClaudeAccountProfile?, primaryAliases: [URL] = [], expectedAccountID: String, fable: Bool = false
     ) async throws {
         func currentAccountID() -> String? {
             ClaudeAccountProfile.currentAccountID(for: profile)
@@ -163,8 +165,8 @@ struct ClaudeClient {
             throw ClaudeClientError.requestFailed("The account changed while checking reset credits. Refresh and try again.")
         }
         let object = try JSONSerialization.jsonObject(with: usage.data) as? [String: Any]
-        guard let grantID = parseClaudeWeeklyResetCredits(object?["cedar_ember"])?.grantID else {
-            throw ClaudeClientError.requestFailed("This account has no available weekly reset credits.")
+        guard let grantID = parseClaudeWeeklyResetCredits(object?["cedar_ember"], fable: fable)?.grantID else {
+            throw ClaudeClientError.requestFailed("This account has no available \(fable ? "Fable" : "weekly") reset credits.")
         }
         let response = try await request(
             path: "/api/organizations/\(organization)/reset_rate_limits", token: usage.token,
@@ -334,6 +336,7 @@ struct ClaudeClient {
         }
 
         let credits = parseClaudeWeeklyResetCredits(root["cedar_ember"])
+        let fableCredits = parseClaudeWeeklyResetCredits(root["cedar_ember"], fable: true)
         return ProviderSnapshot(
             connected: true,
             shortWindow: windows.first { $0.limitID == "claude" && $0.windowMinutes == LimitWindow.sessionMinutes },
@@ -342,13 +345,16 @@ struct ClaudeClient {
             error: nil,
             weeklyResetCredits: credits?.count,
             resetCreditExpiries: credits?.expiries,
+            fableResetCredits: fableCredits?.count,
+            fableResetCreditExpiries: fableCredits?.expiries,
             resetCreditsFetched: true
         )
     }
 }
 
+/// Full weekly resets, or with `fable` the Fable resets, which give back what Fable used instead of clearing the week.
 private func parseClaudeWeeklyResetCredits(
-    _ raw: Any?, at now: Date = Date()
+    _ raw: Any?, fable: Bool = false, at now: Date = Date()
 ) -> (count: Int, grantID: String?, expiries: [Date?])? {
     guard let block = raw as? [String: Any], let eligible = block["eligible"] as? Bool else { return nil }
     guard eligible else { return block["ineligible_reason"] as? String == "no_grant" ? (0, nil, []) : nil }
@@ -359,8 +365,8 @@ private func parseClaudeWeeklyResetCredits(
     for grant in grants {
         guard let left = grant["resets_left"] as? Int, left >= 0,
               let clears = grant["clears"] as? [String] else { return nil }
-        guard clears.contains("seven_day"), left > 0, grant["paused"] as? Bool != true,
-              grant["gives_back_weekly"] as? Bool != true else { continue }
+        guard (grant["gives_back_weekly"] as? Bool == true) == fable, fable || clears.contains("seven_day"),
+              left > 0, grant["paused"] as? Bool != true else { continue }
         if let rawStart = grant["starts_at"] as? String {
             guard let start = parseISO8601(rawStart) else { return nil }
             if start > now { continue }
@@ -632,7 +638,7 @@ private func parseClaudeWindow(_ raw: Any?, label: String, minutes: Int) -> Limi
     )
 }
 
-private func retryAfterInterval(from response: HTTPURLResponse) -> TimeInterval? {
+func retryAfterInterval(from response: HTTPURLResponse) -> TimeInterval? {
     guard let raw = response.value(forHTTPHeaderField: "Retry-After")?
         .trimmingCharacters(in: .whitespacesAndNewlines),
         !raw.isEmpty
@@ -663,7 +669,7 @@ private func retryAfterInterval(from response: HTTPURLResponse) -> TimeInterval?
     return nil
 }
 
-private func parseISO8601(_ value: String) -> Date? {
+func parseISO8601(_ value: String) -> Date? {
     let fractional = ISO8601DateFormatter()
     fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     if let date = fractional.date(from: value) {

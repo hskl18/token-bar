@@ -43,16 +43,28 @@ Activity selection uses its own successful-read timestamp rather than the freshn
 Claude folders signed in to the same login appear once, read with the first of their folders that holds a sign-in and still names that login, and their sessions share that login's weekly window scan.
 Extra accounts add quota rows, a weekly estimate from their login's local sessions, and their usage to the activity cards.
 Accounts can also share one history through linked folders; see [Shared accounts](SHARED-ACCOUNTS.md).
+Settings, opened from the gear beside Refresh, lists every detected folder with a checkbox, saved in `tokenbar.hidden-accounts.v1`.
+An unchecked folder gets no quota row and no quota requests, while the activity scan still counts its local history.
+
+Kiro accounts are the Kiro IDE's sign-in in `~/.aws/sso/cache/kiro-auth-token.json` and the Kiro CLI's in the `auth_kv` table of `~/Library/Application Support/kiro-cli/data.sqlite3`.
+Each refresh not narrowed to Claude or Codex reads their credits from `GET https://q.<region>.amazonaws.com/getUsageLimits`, the CodeWhisperer endpoint both clients call, with the saved bearer token.
+Token Bar never renews that token, since Kiro renews it when it next needs it, so a lapsed token means Kiro is not in use rather than signed out.
+For the IDE, a lapsed token falls back to the credits the IDE last read, which it keeps under `kiro.kiroAgent` in its `state.vscdb`; that reading keeps Kiro's time and makes the row idle once it is over an hour old.
+A lapsed Kiro CLI token sends no request and leaves the row idle with its last reading.
+The IDE and the CLI signed in to the same Kiro user share one row, the IDE's, showing the reading that is neither idle nor stale, else the newer one.
+The user comes from each live reading's `userInfo.userId`; the CLI's is also its local `telemetryUserId`, the same ID, so it is known without a request.
+A Kiro row has one ring in the shared `Credit` column for the plan's monthly credits, an active trial and active bonus credits together, since Kiro spends them as one balance; it resets with the plan, and its hover lists each pool's amount and reset or expiry.
+This was checked against Kiro CLI 3.3.0 with a Builder ID; a social sign-in with a profile ARN sends it as `profileArn`, untested.
 
 The presentation layer derives one of four states from displayable provider data: none, Claude-only, Codex-only, or both.
 Any account of a provider counts, so a provider whose only signed-in login is an extra folder still shows its activity, header, and All.
 A header and All are marked stale when any account whose percentage they include is stale.
 Hovering the marker lists each stale account with its error and the time of the reading shown.
-An idle account, one without a 5-hour window whose sign-in expired, is not stale: its row says "Idle since <time>".
+An idle account, one without a 5-hour window whose sign-in expired, is not stale: its row says "Idle", and hovering over that gives the time of its last reading.
 Only the dual-provider state renders All, and each state has its own compact panel height.
 Both providers show every returned quota window, and the panel grows by one row per account until it reaches 85% of the screen height, after which the quota area scrolls.
 The row height is an estimate; the quota list measures its content against the space it got, and the panel adds the difference and keeps it across refreshes, so the list does not scroll before that limit.
-The UI lists one row per account, Claude accounts, then Codex accounts, keeping account order; each row has a ring per window, 5-hour, then Weekly, then any others, with the main Codex bucket first.
+The UI lists one row per account, Claude accounts, then Codex accounts, then Kiro, keeping account order; each row has a ring per window, 5-hour, then Weekly, then any others, with the main Codex bucket first.
 The parser retains the server's `limitName` for presentation.
 A missing 5-hour window is never inferred from the plan name; Plus, Pro, and future plans follow the account response.
 Provider headers and All weight each account's weekly percentage by its estimated weekly tokens; see [combined percentage](PRICING.md#combined-percentage).

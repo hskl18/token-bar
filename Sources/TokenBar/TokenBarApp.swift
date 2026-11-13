@@ -67,17 +67,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Quota moves slowly; opening the menu still reads anything older than the store's freshness limit.
     private let localScanInterval: TimeInterval = 10 * 60
     private var cancellables: Set<AnyCancellable> = []
+    private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusPanel = StatusPanelController(
             contentViewController: NSHostingController(
-                rootView: RootView { [weak self] provider, source, name in
-                    self?.statusPanel?.hide()
-                    // Leave the menu tracking loop before entering an alert's modal loop.
-                    DispatchQueue.main.async { [weak self] in
-                        self?.store.confirmWeeklyReset(provider: provider, source: source, name: name)
+                rootView: RootView(
+                    onWeeklyReset: { [weak self] provider, source, name, fable in
+                        self?.statusPanel?.hide()
+                        // Leave the menu tracking loop before entering an alert's modal loop.
+                        DispatchQueue.main.async { [weak self] in
+                            self?.store.confirmWeeklyReset(provider: provider, source: source, name: name, fable: fable)
+                        }
+                    },
+                    onSettings: { [weak self] in
+                        self?.statusPanel?.hide()
+                        DispatchQueue.main.async { [weak self] in self?.showSettings() }
                     }
-                }.environmentObject(store)
+                ).environmentObject(store)
             ),
             contentSize: TokenBarLayout.panelSize(for: store.snapshot)
         )
@@ -214,6 +221,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         for account in ready { lastLocalScanAt[account] = now }
         pendingLocalAccounts.subtract(attempted)
+        // A turned-off folder is never read, so its scan just now is all its activity needs.
+        pendingLocalAccounts.subtract(ready.filter { store.snapshot.isHidden($0) })
         scheduleNextPendingLocalRefresh()
     }
 
@@ -269,6 +278,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // A refresh that sends no snapshot leaves no one else to schedule the next account's reset.
         scheduleNextClaudeWindowRefresh(for: store.snapshot)
+    }
+
+    private func showSettings() {
+        if settingsWindow == nil {
+            let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsView().environmentObject(store)))
+            window.title = "Token Bar Settings"
+            window.styleMask = [.titled, .closable]
+            window.isReleasedWhenClosed = false
+            window.center()
+            settingsWindow = window
+        }
+        // A menu bar app is not active, so its window would open behind the current app.
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
     // No tooltip: an auto-hiding menu bar can leave it stranded mid-screen after the bar hides.
