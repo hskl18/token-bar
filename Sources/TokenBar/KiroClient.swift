@@ -47,12 +47,13 @@ struct KiroClient {
     /// A reading from the IDE's saved state carries the time Kiro took it in `lastSuccessAt`, and no user.
     func fetch(_ source: KiroSource) async throws -> (quota: ProviderSnapshot, accountID: String?) {
         let token = try await Task.detached(priority: .utility) { try readToken(source) }.value
-        guard token.expiresAt.map({ $0 > Date().addingTimeInterval(60) }) ?? true else {
+        func lapsed() async throws -> (quota: ProviderSnapshot, accountID: String?) {
             if !source.isCLI, let cached = await Task.detached(priority: .utility, operation: readIDEUsageCache).value {
                 return (cached, nil)
             }
             throw ClaudeClientError.authenticationExpired
         }
+        guard token.expiresAt.map({ $0 > Date().addingTimeInterval(60) }) ?? true else { return try await lapsed() }
         // The CodeWhisperer endpoint both Kiro and the Kiro CLI call for usage limits; a Builder ID has no profile,
         // and a profile's ARN names its region in its fourth field, which Kiro prefers over the sign-in's.
         let arnRegion = token.profileArn.flatMap { arn in
@@ -74,7 +75,8 @@ struct KiroClient {
         case 200..<300:
             let user = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["userInfo"] as? [String: Any]
             return (try parseKiroUsage(data), (user?["userId"] as? String).flatMap { $0.isEmpty ? nil : $0 })
-        case 401: throw ClaudeClientError.authenticationExpired
+        // The server can end a token before its saved expiry, which lapses it all the same.
+        case 401: return try await lapsed()
         case 403: throw ClaudeClientError.accessDenied
         case 429: throw ClaudeClientError.rateLimited(retryAfter: retryAfterInterval(from: http))
         default: throw ClaudeClientError.requestFailed("Kiro usage request returned HTTP \(http.statusCode).")

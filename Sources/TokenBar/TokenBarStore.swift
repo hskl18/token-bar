@@ -1727,9 +1727,11 @@ final class TokenBarStore: ObservableObject {
         // Kiro keeps no local history here, so a turned-off Kiro sign-in is simply left out.
         let kiroAccounts = KiroSource.detected.filter { !snapshot.isHidden($0.path) }.map { source in
             let cached = snapshot.kiroAccounts?.first { $0.id == source.path }
+            let accountID = source.localAccountID ?? cached?.accountID
+            // A sign-in now naming another Kiro user must not keep the previous user's credits.
             return KiroAccountSnapshot(
-                id: source.path, name: source.name, quota: cached?.quota ?? .empty,
-                accountID: source.localAccountID ?? cached?.accountID
+                id: source.path, name: source.name,
+                quota: accountID == cached?.accountID ? cached?.quota ?? .empty : .empty, accountID: accountID
             )
         }
         next.kiroAccounts = kiroAccounts.isEmpty ? nil : kiroAccounts
