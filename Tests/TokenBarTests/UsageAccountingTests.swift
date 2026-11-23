@@ -17,8 +17,11 @@ final class UsageAccountingTests: XCTestCase {
     }
 
     func testDailyPricesStayFrozenWhenTheCatalogChanges() async throws {
-        let suite = "TokenBarTests.\(UUID().uuidString)"
+        // One fixed suite: macOS keeps an empty preferences file for every emptied suite, so a name per run
+        // left one file behind each time.
+        let suite = "TokenBarTests"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
         defer { defaults.removePersistentDomain(forName: suite) }
         // A fresh cache for every source keeps the catalog offline.
         func publish(rate: Double) throws {
