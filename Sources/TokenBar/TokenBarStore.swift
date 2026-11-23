@@ -70,7 +70,7 @@ final class TokenBarStore: ObservableObject {
                 || snapshot.imageGenerationUsage == nil
                 || snapshot.claudeWeeklyValue.map { $0.resetsAt == nil } == true
                 || snapshot.codexWeeklyValue.map { $0.resetsAt == nil } == true
-                || (snapshot.codexWeeklyEstimateSource == nil
+                || (snapshot.codexWeeklyCapacity == nil
                     && snapshot.codex.headlinePercent != nil)
         )
     }
@@ -126,16 +126,19 @@ final class TokenBarStore: ObservableObject {
             return
         }
 
-        // A quit or timeout after spending must not restore a usable cached button.
-        if isPrimary {
-            if provider == .claude { snapshot.claude.resetCreditsFetched = false }
-            else { snapshot.codex.resetCreditsFetched = false }
-        } else if provider == .claude,
-                  let index = snapshot.additionalClaudeAccounts?.firstIndex(where: { $0.sourceDirectory == directory.path }) {
-            snapshot.additionalClaudeAccounts?[index].quota.resetCreditsFetched = false
-        } else if let index = snapshot.additionalCodexAccounts?.firstIndex(where: { $0.sourceDirectory == directory.path }) {
-            snapshot.additionalCodexAccounts?[index].quota.resetCreditsFetched = false
+        func setCreditsFetched(_ fetched: Bool) {
+            if isPrimary {
+                if provider == .claude { snapshot.claude.resetCreditsFetched = fetched }
+                else { snapshot.codex.resetCreditsFetched = fetched }
+            } else if provider == .claude,
+                      let index = snapshot.additionalClaudeAccounts?.firstIndex(where: { $0.sourceDirectory == directory.path }) {
+                snapshot.additionalClaudeAccounts?[index].quota.resetCreditsFetched = fetched
+            } else if let index = snapshot.additionalCodexAccounts?.firstIndex(where: { $0.sourceDirectory == directory.path }) {
+                snapshot.additionalCodexAccounts?[index].quota.resetCreditsFetched = fetched
+            }
         }
+        // A quit or timeout after spending must not restore a usable cached button.
+        setCreditsFetched(false)
         saveSnapshot()
 
         let primaryAliases = claudePrimaryAliases
@@ -163,6 +166,8 @@ final class TokenBarStore: ObservableObject {
                 } else if let index = snapshot.additionalCodexAccounts?.firstIndex(where: { $0.sourceDirectory == directory.path }) {
                     applyCodexAccountResult(.failure(error), at: index, date: date)
                 }
+                // A rate-limited request spent nothing, so the credits read before it still stand.
+                if case .rateLimited? = error as? ClaudeClientError { setCreditsFetched(true) }
                 saveSnapshot()
                 let failure = NSAlert(error: error)
                 failure.messageText = "Reset failed for \(name)"
@@ -351,7 +356,6 @@ final class TokenBarStore: ObservableObject {
                         recordSuccess(&quota, at: attemptedAt)
                         if let reset = droppedWeeklyReset(from: snapshot.codex, to: quota) {
                             snapshot.codexWeeklyInvalidatedReset = reset
-                            snapshot.codexAccountWindowBaselines = []
                         }
                         snapshot.codex = quota
                         codexSucceeded = true
@@ -392,7 +396,6 @@ final class TokenBarStore: ObservableObject {
             if let id = snapshot.codexAccountID, let quota = freshQuotas[id] {
                 if let reset = droppedWeeklyReset(from: snapshot.codex, to: quota) {
                     snapshot.codexWeeklyInvalidatedReset = reset
-                    snapshot.codexAccountWindowBaselines = []
                 }
                 snapshot.codex = quota
                 codexSucceeded = true
@@ -577,12 +580,10 @@ final class TokenBarStore: ObservableObject {
                     codexWeeklyMix = await catalog.costMix(for: codexWindowLedger.mixLedger)
                 }
                 guard !Task.isCancelled, refreshGeneration == generation else { return }
-                updateCodexAccountEstimates(
-                    activity: officialCodexActivity,
+                updateCodexWeeklyEstimate(
                     costMix: codexWeeklyMix,
-                    localResult: codexWindowResult,
-                    localLedger: codexWindowLedger,
-                    observedAt: attemptedAt
+                    result: codexWindowResult,
+                    ledger: codexWindowLedger
                 )
             }
             if let claudeLedger {
@@ -1138,208 +1139,69 @@ final class TokenBarStore: ObservableObject {
         }
     }
 
-    private func updateCodexAccountEstimates(
-        activity: TokenActivity?,
+    // Only this Mac's window records count: the account usage counter (`account/usage/read`) sums whole UTC days
+    // and lags by hours, so a baseline taken at a weekly reset charged the previous week's late tokens to the new one.
+    private func updateCodexWeeklyEstimate(
         costMix: CostMix,
-        localResult: Result<CodexWindowLedger, Error>?,
-        localLedger: CodexWindowLedger?,
-        observedAt: Date
+        result: Result<CodexWindowLedger, Error>?,
+        ledger: CodexWindowLedger?
     ) {
         snapshot.codexWeeklyCapacity = nil
         snapshot.codexWeeklyValue = nil
-        snapshot.codexWeeklyEstimateSource = nil
         estimateFailures["Codex estimate"] = nil
         guard let window = weeklyWindow(in: snapshot.codex),
-              !sameReset(window.resetsAt, snapshot.codexWeeklyInvalidatedReset),
-              let durationMinutes = window.windowMinutes,
-              let resetsAt = window.resetsAt
+              !sameReset(window.resetsAt, snapshot.codexWeeklyInvalidatedReset)
         else {
             snapshot.codexWeeklyValueError = "Weekly usage is unavailable."
             return
         }
-        guard localLedger?.unreconciledMessageHashes?.isEmpty != false else {
-            snapshot.codexWeeklyValueError = "Overlapping local histories cannot be fully reconciled without their missing logs."
-            return
-        }
-        guard let lifetimeTokens = activity?.lifetimeTokens else {
-            updateCodexLocalFallback(
-                result: localResult,
-                ledger: localLedger,
-                costMix: costMix
-            )
-            return
-        }
-
-        let windowStartedAt = resetsAt.addingTimeInterval(-Double(durationMinutes) * 60)
-        let priorBaseline = snapshot.codexAccountWindowBaselines?.first(where: {
-            $0.windowID == window.id
-                && abs($0.windowStartedAt.timeIntervalSince(windowStartedAt)) < 2
-                && abs($0.resetsAt.timeIntervalSince(resetsAt)) < 2
-        })
-        let lifetimeCounterReset = priorBaseline.map { lifetimeTokens < $0.lifetimeTokens } ?? false
-        updateCodexAccountBaselines(lifetimeTokens: lifetimeTokens, observedAt: observedAt)
-        guard let baseline = snapshot.codexAccountWindowBaselines?.first(where: {
-            $0.windowID == window.id
-                && abs($0.windowStartedAt.timeIntervalSince(windowStartedAt)) < 2
-                && abs($0.resetsAt.timeIntervalSince(resetsAt)) < 2
-        }) else {
-            updateCodexLocalFallback(
-                result: localResult,
-                ledger: localLedger,
-                costMix: costMix
-            )
-            return
-        }
-        guard !lifetimeCounterReset else {
-            updateCodexLocalFallback(
-                result: localResult,
-                ledger: localLedger,
-                costMix: costMix
-            )
-            return
-        }
-        guard baseline.startsAtWindowBoundary else {
-            updateCodexLocalFallback(
-                result: localResult,
-                ledger: localLedger,
-                costMix: costMix
-            )
-            return
-        }
-
-        let observedTokens = lifetimeTokens - baseline.lifetimeTokens
-        let localObservedTokens = localLedger?.isComplete == true && localLedger?.parseErrors == 0
-            ? localLedger?.observedTokens ?? 0 : 0
-        guard observedTokens > 0, observedTokens >= localObservedTokens else {
-            updateCodexLocalFallback(
-                result: localResult,
-                ledger: localLedger,
-                costMix: costMix
-            )
-            return
-        }
-        let capacity = currentCapacity(window: window, observedTokens: observedTokens)
-        if let capacity {
-            snapshot.codexWeeklyCapacity = capacity
-            snapshot.codexWeeklyEstimateSource = .accountLifetime
-        }
-        let status = weeklyValueEstimate(
-            capacity: capacity,
-            observedTokens: observedTokens,
-            costMix: costMix,
-            requiresExactTokenMatch: false,
-            resetsAt: window.resetsAt
-        )
-        switch status {
-        case let .available(estimate):
-            snapshot.codexWeeklyValue = estimate
-            snapshot.codexWeeklyValueError = nil
-            snapshot.codexWeeklyEstimateSource = .accountLifetime
-        case let .unavailable(error):
-            snapshot.codexWeeklyValueError = error
-        }
-    }
-
-    private func updateCodexLocalFallback(
-        result: Result<CodexWindowLedger, Error>?,
-        ledger: CodexWindowLedger?,
-        costMix: CostMix
-    ) {
         if case let .failure(error)? = result {
-            snapshot.codexWeeklyValueError = "Local fallback scan failed: \(error.localizedDescription)"
+            snapshot.codexWeeklyValueError = "Local weekly scan failed: \(error.localizedDescription)"
             estimateFailures["Codex estimate"] = snapshot.codexWeeklyValueError
             return
         }
         guard let ledger else {
-            snapshot.codexWeeklyCapacity = nil
-            snapshot.codexWeeklyValue = nil
-            snapshot.codexWeeklyEstimateSource = nil
-            snapshot.codexWeeklyValueError = "Waiting for a weekly account baseline or local fallback."
+            snapshot.codexWeeklyValueError = "Waiting for the local weekly records."
             return
         }
-
+        guard ledger.unreconciledMessageHashes?.isEmpty != false else {
+            snapshot.codexWeeklyValueError = "Overlapping local histories cannot be fully reconciled without their missing logs."
+            return
+        }
         guard ledger.isComplete else {
-            snapshot.codexWeeklyValueError = "The local weekly fallback is still updating."
+            snapshot.codexWeeklyValueError = "The local weekly records are still updating."
             return
         }
         guard ledger.parseErrors == 0 else {
-            snapshot.codexWeeklyValueError = "The local fallback contains \(ledger.parseErrors) unreadable log entries."
+            snapshot.codexWeeklyValueError = "The local weekly records contain \(ledger.parseErrors) unreadable log entries."
             estimateFailures["Codex estimate"] = snapshot.codexWeeklyValueError
-            return
-        }
-        guard let window = weeklyWindow(in: snapshot.codex) else {
-            snapshot.codexWeeklyValueError = "Weekly usage is unavailable."
             return
         }
 
         let capacity = currentCapacity(window: window, observedTokens: ledger.observedTokens)
-        if let capacity {
-            snapshot.codexWeeklyCapacity = capacity
-            snapshot.codexWeeklyEstimateSource = .localWindowFallback
-        }
-        let status = weeklyValueEstimate(
+        snapshot.codexWeeklyCapacity = capacity
+        switch weeklyValueEstimate(
             capacity: capacity,
             observedTokens: ledger.observedTokens,
             costMix: costMix,
             requiresExactTokenMatch: true,
             resetsAt: window.resetsAt
-        )
-        switch status {
+        ) {
         case let .available(estimate):
             snapshot.codexWeeklyValue = estimate
             snapshot.codexWeeklyValueError = nil
-            snapshot.codexWeeklyEstimateSource = .localWindowFallback
         case let .unavailable(error):
-            if snapshot.codexWeeklyCapacity == nil {
-                snapshot.codexWeeklyEstimateSource = nil
-            }
             snapshot.codexWeeklyValueError = error
-        }
-    }
-
-    private func updateCodexAccountBaselines(lifetimeTokens: Int64, observedAt: Date) {
-        let windows = allWindows(in: snapshot.codex).filter {
-            $0.windowMinutes != nil && $0.resetsAt != nil
-        }
-        let existing = snapshot.codexAccountWindowBaselines ?? []
-        let startTolerance: TimeInterval = 15 * 60
-        snapshot.codexAccountWindowBaselines = windows.compactMap { window in
-            guard let durationMinutes = window.windowMinutes,
-                  let resetsAt = window.resetsAt
-            else {
-                return nil
-            }
-            let windowStartedAt = resetsAt.addingTimeInterval(-Double(durationMinutes) * 60)
-            if let baseline = existing.first(where: {
-                $0.windowID == window.id
-                    && abs($0.windowStartedAt.timeIntervalSince(windowStartedAt)) < 2
-                    && abs($0.resetsAt.timeIntervalSince(resetsAt)) < 2
-                    && lifetimeTokens >= $0.lifetimeTokens
-                    && window.usedPercent >= ($0.usedPercent ?? 0)
-            }) {
-                return baseline
-            }
-            return CodexAccountWindowBaseline(
-                windowID: window.id,
-                windowMinutes: durationMinutes,
-                windowStartedAt: windowStartedAt,
-                resetsAt: resetsAt,
-                lifetimeTokens: lifetimeTokens,
-                observedAt: observedAt,
-                startsAtWindowBoundary: abs(observedAt.timeIntervalSince(windowStartedAt)) <= startTolerance
-                    || window.usedPercent <= 0.5,
-                usedPercent: window.usedPercent
-            )
         }
     }
 
     private static let renewingMessage = "Sign-in expired; renewing."
 
     // Claude Code renews an expired sign-in whenever it runs, so an account with a 5-hour limit renews through
-    // the message that starts its window; an account without one is left for its owner to open.
+    // the message that starts its window, even when a full week refuses it; an account without one is left for its owner to open.
     private func renewsByStartingWindow(_ previous: ProviderSnapshot, after error: Error) -> Bool {
         guard case .authenticationExpired? = error as? ClaudeClientError else { return false }
-        return previous.shortWindow != nil && hasWeeklyRoom(previous)
+        return previous.shortWindow != nil
     }
 
     /// Applies additional Claude readings and returns the profiles whose 5-hour window is idle or whose
@@ -1637,9 +1499,9 @@ final class TokenBarStore: ObservableObject {
 
         let failureCount = max(1, (provider.consecutiveRateLimits ?? 0) + 1)
         provider.consecutiveRateLimits = failureCount
-        let exponent = min(2, failureCount - 1)
-        let fallback = min(60 * 60, 15 * 60 * pow(2, Double(exponent)))
-        let delay = max(fallback, retryAfter ?? 0)
+        // The server's own wait wins: the endpoint has answered again six minutes after a 429, so a fixed
+        // 15 minutes only kept an outdated reading. Without one, waits double from the usual 5 minutes up to an hour.
+        let delay = retryAfter ?? min(60 * 60, freshnessInterval * pow(2, Double(min(4, failureCount - 1))))
         provider.nextAllowedRefreshAt = date.addingTimeInterval(delay)
         provider.error = (provider.error ?? "") + " Next try "
             + date.addingTimeInterval(delay).formatted(date: .omitted, time: .shortened) + "."
@@ -1654,11 +1516,9 @@ final class TokenBarStore: ObservableObject {
         snapshot.codex = .empty
         snapshot.tokenActivity = .empty
         snapshot.codexCostLedger = nil
-        snapshot.codexAccountWindowBaselines = []
         snapshot.codexWeeklyInvalidatedReset = nil
         snapshot.codexWeeklyCapacity = nil
         snapshot.codexWeeklyValue = nil
-        snapshot.codexWeeklyEstimateSource = nil
         snapshot.codexWeeklyValueError = nil
         snapshot.codexActivityError = nil
         snapshot.codexActivityLastSuccessAt = nil
@@ -1800,7 +1660,6 @@ final class TokenBarStore: ObservableObject {
         }
         snapshot.codexWeeklyCapacity = nil
         snapshot.codexWeeklyValue = nil
-        snapshot.codexWeeklyEstimateSource = nil
         saveSnapshot()
     }
 

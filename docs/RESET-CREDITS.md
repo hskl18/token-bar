@@ -36,7 +36,8 @@ HTTP 429 never triggers that fallback and retains the existing cooldown.
 ## Display
 
 An account row places one capsule under the account's name when its main Weekly window has credits: `2 Reset` for full weekly resets, then, after a divider, the number of Fable resets, as in `2 Reset | 3`.
-Zero, unknown, and stale counts are hidden.
+Zero and unknown counts are hidden.
+A stale count stays, as of its last reading, since spending rereads the grants.
 Hovering over either part lists when its credits expire, soonest first, when the provider gave expiry details.
 Each part opens an account-specific confirmation before using one reset of its kind; `0 Reset` beside Fable resets is disabled.
 Session windows, activity estimates, and combined percentages keep their existing presentation and calculations.
@@ -50,10 +51,12 @@ The client checks that the account in the selected directory still matches the a
 
 Codex uses the documented `account/rateLimitResetCredit/consume` method with a fresh idempotency key.
 It uses one runtime and does not retry an uncertain spend through another runtime.
-Claude rereads the grants, selects the first active grant of the chosen kind, and uses the installed CLI's `reset_rate_limits` request shape with its grant and request identifiers.
+A Claude login whose sign-in lapsed first runs Claude Code's one-word prompt that starts a 5-hour window, since only Claude Code renews a sign-in, unless that prompt already ran for the login within 15 minutes; with the week used up, the prompt is refused and spends nothing.
+Claude then rereads the grants, selects the first active grant of the chosen kind, and uses the installed CLI's `reset_rate_limits` request shape with its grant and request identifiers.
 Neither provider's spend request is automatically retried.
 
 Before sending a spend, Token Bar invalidates the saved reset-count freshness so a quit cannot restore a usable old button.
+A request that fails with HTTP 429 spent nothing, so the saved count becomes usable again.
 Success and failure both schedule a refresh of the selected account, respecting existing rate-limit cooldowns.
 Reset credits were not consumed to verify this implementation.
 

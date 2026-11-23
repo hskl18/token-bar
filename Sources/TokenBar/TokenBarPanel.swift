@@ -173,7 +173,8 @@ private struct UnifiedUsagePage: View {
                 }
                 return ($0.windowMinutes ?? Int.max) < ($1.windowMinutes ?? Int.max)
             }
-            let creditsCurrent = !quota.isStale && quota.idle != true && quota.resetCreditsFetched == true
+            // A stale count still shows, since spending rereads the grants; a spent one waits for a fresh reading.
+            let creditsKnown = quota.idle != true && quota.resetCreditsFetched == true
             // A Claude model's own weekly limit, such as Fable's, gets no ring when a Week ring can list it in its hover.
             let hasWeek = groupedWindows.contains { $0.limitID == "claude" && $0.windowMinutes == LimitWindow.weeklyMinutes }
             let modelWeeks = name == "Claude" && hasWeek ? groupedWindows.filter {
@@ -186,6 +187,9 @@ private struct UnifiedUsagePage: View {
                 let detail = name == "Codex" && window.quotaDisplayName != "Codex" ? window.quotaDisplayName
                     : name == "Claude" && window.windowMinutes == LimitWindow.weeklyMinutes ? window.limitName : nil
                 let provider = detail.map { title + " · " + $0 } ?? title
+                let estimate = name == "Kiro" ? nil : store.weeklyEstimate(
+                    for: name == "Claude" ? .claude : .codex, account: key, window: window, in: quota
+                )
                 items.append(NamedWindow(
                     provider: provider, account: title, detail: detail,
                     scope: name, source: source, window: window, barBase: color,
@@ -194,13 +198,13 @@ private struct UnifiedUsagePage: View {
                     status: idleSince.map { _ in "Idle" } ?? (name == "Kiro" && quota.error != nil ? "Out of date" : nil),
                     statusHelp: idleSince.map { "Idle since \(readingTime($0))\n" + idleReason(name) }
                         ?? quota.error.map { error in quota.lastSuccessAt.map { "\(error) As of \(readingTime($0))." } ?? error },
-                    weeklyResetCredits: creditsCurrent ? quota.weeklyResetCredits : nil,
+                    weeklyResetCredits: creditsKnown ? quota.weeklyResetCredits : nil,
                     resetCreditExpiries: quota.resetCreditExpiries,
-                    fableResetCredits: creditsCurrent ? quota.fableResetCredits : nil,
+                    fableResetCredits: creditsKnown ? quota.fableResetCredits : nil,
                     fableResetCreditExpiries: quota.fableResetCreditExpiries,
-                    help: ([windowHelp(window, readAt: quota.lastSuccessAt, estimate: name == "Kiro" ? nil : store.weeklyEstimate(
-                        for: name == "Claude" ? .claude : .codex, account: key, window: window, in: quota
-                    ))] + (isWeek ? modelLines : [])).filter { !$0.isEmpty }.joined(separator: "\n")
+                    help: ([windowHelp(window, readAt: quota.lastSuccessAt)]
+                        + (isWeek ? modelLines : [])).filter { !$0.isEmpty }.joined(separator: "\n"),
+                    estimate: estimate
                 ))
             }
             if groupedWindows.isEmpty && showUnavailable {
@@ -422,6 +426,14 @@ private struct AccountRow: View {
         }
     }
 
+    /// The name's hover: the weekly estimate, then any credit pool's amounts, such as claude-x's `$50.00 of $50.00`.
+    private var nameHelp: String {
+        let estimate = windows.lazy.compactMap { item in
+            item.estimate.map { estimateLines($0, used: item.window?.usedPercent ?? 0) }
+        }.first ?? []
+        return (estimate + windows.compactMap { $0.window?.amounts }).joined(separator: "\n")
+    }
+
     var body: some View {
         HStack(alignment: .center, spacing: QuotaRing.nameSpacing) {
             // Every row centers its name, status and reset capsule on the name column's middle, so they share one axis.
@@ -430,6 +442,7 @@ private struct AccountRow: View {
                     .font(.system(size: TokenBarType.primary, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
+                    .hoverHelp(nameHelp)
                 if let item = windows.first(where: { $0.status != nil }), let status = item.status {
                     Text(status)
                         .font(.system(size: TokenBarType.secondary, weight: .medium))
@@ -947,6 +960,8 @@ private struct NamedWindow: Identifiable {
     var fableResetCredits: Int? = nil
     var fableResetCreditExpiries: [Date?]? = nil
     var help = ""
+    /// The account's weekly estimate, set on its main weekly window only; the name's hover shows it.
+    var estimate: WeeklyValueEstimate? = nil
 
     var id: String { scope + source + (window?.id ?? "unavailable") }
     var column: QuotaColumn? { window.map { QuotaColumn(window: $0, detail: detail, scope: scope) } }
@@ -959,35 +974,30 @@ private func resetText(_ date: Date?) -> String {
     formatter.allowedUnits = date.timeIntervalSinceNow > 24 * 60 * 60 ? [.day, .hour] : [.hour, .minute]
     formatter.unitsStyle = .abbreviated
     formatter.maximumUnitCount = 2
-    return "Resets in " + (formatter.string(from: Date(), to: date) ?? "soon")
+    // One line for the countdown and the time, so the hover names the reset once.
+    return "Resets in " + (formatter.string(from: Date(), to: date) ?? "soon") + " · " + readingTime(date)
 }
 
-/// A quota row's hover: what its weekly percentage has used and would allow, its reset time and, at the pace
-/// so far in the window, where it ends up.
-private func windowHelp(_ window: LimitWindow, readAt: Date?, estimate: WeeklyValueEstimate?) -> String {
+/// A ring's hover after its percentage and reset: at the pace so far in the window, where it ends up.
+/// The name's hover has the weekly estimate and credit amounts, so the ring does not repeat them.
+private func windowHelp(_ window: LimitWindow, readAt: Date?) -> String {
     let used = window.usedPercent
-    var lines: [String] = []
-    if let estimate {
-        lines.append("So far: \(compactTokens(estimate.observedTokens)) tokens"
-            + " · \(usdText(estimate.observedCostUSD))")
-        if used < 100 {
-            lines.append("100% ≈ \(compactTokens(estimate.equivalentTokens)) tokens · \(usdText(estimate.equivalentValueUSD))")
-        }
-    }
-    guard let reset = window.resetsAt, reset > Date() else { return lines.joined(separator: "\n") }
-    lines.append("Resets \(readingTime(reset))")
-    if let minutes = window.windowMinutes, let readAt, used > 0, used < 100 {
-        let length = Double(minutes) * 60
-        let elapsed = length - reset.timeIntervalSince(readAt)
-        // Early in a window, or with a reading from an earlier one, a pace means little.
-        if elapsed >= length / 20 {
-            let atReset = used * length / elapsed
-            lines.append("At this pace: " + (atReset < 100
-                ? "\(Int(atReset.rounded()))% at reset"
-                : "100% by \(readingTime(readAt.addingTimeInterval((100 - used) / used * elapsed)))"))
-        }
-    }
-    return lines.joined(separator: "\n")
+    guard let reset = window.resetsAt, reset > Date(), let minutes = window.windowMinutes, let readAt,
+          used > 0, used < 100 else { return "" }
+    let length = Double(minutes) * 60
+    let elapsed = length - reset.timeIntervalSince(readAt)
+    // Early in a window, or with a reading from an earlier one, a pace means little.
+    guard elapsed >= length / 20 else { return "" }
+    let atReset = used * length / elapsed
+    return "At this pace: " + (atReset < 100
+        ? "\(Int(atReset.rounded()))% at reset"
+        : "100% by \(readingTime(readAt.addingTimeInterval((100 - used) / used * elapsed)))")
+}
+
+/// What a weekly window has used so far and what its full 100% would be worth, for the account name's hover.
+private func estimateLines(_ estimate: WeeklyValueEstimate, used: Double) -> [String] {
+    ["So far: \(compactTokens(estimate.observedTokens)) tokens · \(usdText(estimate.observedCostUSD))"]
+        + (used < 100 ? ["100% ≈ \(compactTokens(estimate.equivalentTokens)) tokens · \(usdText(estimate.equivalentValueUSD))"] : [])
 }
 
 /// A reset button's hover: what it spends and when the credits expire, soonest first.
@@ -1045,7 +1055,7 @@ private func idleReason(_ provider: String) -> String {
 
 /// A ring's center shows the time to its reset, so its hover starts with the used percentage and exact countdown.
 private func ringHelp(_ window: LimitWindow, help: String) -> String {
-    ["\(Int(window.usedPercent.rounded()))% used", window.amounts ?? "", resetText(window.resetsAt), help]
+    ["\(Int(window.usedPercent.rounded()))% used", resetText(window.resetsAt), help]
         .filter { !$0.isEmpty }.joined(separator: "\n")
 }
 

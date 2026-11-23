@@ -20,7 +20,7 @@ import time
 import tomllib
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 
 HOME = os.path.expanduser("~")
 CLAUDE, CODEX = shutil.which("claude"), shutil.which("codex")
@@ -96,8 +96,11 @@ def claude_usage(home):
     except Exception:
         return None
     timed = [w for w in (usage.get("five_hour"), usage.get("seven_day")) if w]
-    # Credit-only plans, such as the Enterprise trial, have no time windows.
-    found = timed or [w for w in [usage.get("extra_usage")] if w]
+    # Credit-only plans, such as the Enterprise trial, have no time windows. Their credits reset at the next UTC
+    # month, as Token Bar shows, so a used-up pool is not mistaken for a signed-out login, which has no reset.
+    now = datetime.now(timezone.utc)
+    month = datetime(now.year + now.month // 12, now.month % 12 + 1, 1, tzinfo=timezone.utc).isoformat()
+    found = timed or [dict(w, resets_at=w.get("resets_at") or month) for w in [usage.get("extra_usage")] if w]
     weekly = (usage.get("seven_day") or {}).get("resets_at")
     return (bool(timed), [(w.get("utilization") or 0, w.get("resets_at") and datetime.fromisoformat(w["resets_at"]).timestamp())
                           for w in found], weekly and datetime.fromisoformat(weekly).timestamp())
@@ -143,11 +146,18 @@ def codex_usage(home):
     credits = limits.get("credits") or {}
     banner = result.get("rateLimitUpsell") or {}
     # Codex's own tests for a usable login (tui backend_banners.rs): percentages alone cannot show a block.
-    # A block stays a full window with no reset, so a saved reading never expires into a free one.
     blocked = (result.get("ordinaryUsageAllowed") is False and not (credits.get("unlimited") or credits.get("hasCredits"))
                or limits.get("spendControlReached") is True or limits.get("rateLimitReachedType") is not None)
     windows = [w for w in (limits.get("primary"), limits.get("secondary")) if w]
-    found = [(w.get("usedPercent") or 0, w.get("resetsAt")) for w in windows] + ([(100, None)] if blocked else [])
+    found = [(w.get("usedPercent") or 0, w.get("resetsAt")) for w in windows]
+    # A reached 5-hour or weekly limit lifts when its full window resets, so it ranks by that reset instead of
+    # with signed-out logins. Any other block stays a full window with no reset, so a saved reading never
+    # expires into a free one.
+    plain = (limits.get("spendControlReached") is not True
+             and limits.get("rateLimitReachedType") in (None, "rate_limit_reached")
+             and any(used >= 100 and reset for used, reset in found))
+    if blocked and not plain:
+        found.append((100, None))
     # A limit on the model this run uses blocks the login until the banner's reset.
     model = codex_model(home, CODEX_ARGS + sys.argv[1:])
     if (model and model in (banner.get("blocked_model_slug"), banner.get("model_slug"))

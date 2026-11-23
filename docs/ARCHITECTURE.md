@@ -53,7 +53,7 @@ For the IDE, a lapsed token falls back to the credits the IDE last read, which i
 A lapsed Kiro CLI token sends no request and leaves the row idle with its last reading.
 The IDE and the CLI signed in to the same Kiro user share one row, the IDE's, showing the reading that is neither idle nor stale, else the newer one.
 The user comes from each live reading's `userInfo.userId`; the CLI's is also its local `telemetryUserId`, the same ID, so it is known without a request.
-A Kiro row has one ring in the shared `Credit` column for the plan's monthly credits, an active trial and active bonus credits together, since Kiro spends them as one balance; it resets with the plan, and its hover lists each pool's amount and reset or expiry.
+A Kiro row has one ring in the shared `Credit` column for the plan's monthly credits, an active trial and active bonus credits together, since Kiro spends them as one balance; it resets with the plan, and the account name's hover lists each pool's amount and reset or expiry.
 This was checked against Kiro CLI 3.3.0 with a Builder ID; a social sign-in with a profile ARN sends it as `profileArn`, untested.
 
 The presentation layer derives one of four states from displayable provider data: none, Claude-only, Codex-only, or both.

@@ -134,6 +134,7 @@ Credit-only logins, such as an Enterprise trial, come last.
 When every login is at a limit, they pick the one that frees up first.
 A login that cannot be read live uses the newer of its last live reading and Token Bar's.
 `cdx` treats a Codex login as blocked when Codex itself would: ordinary usage disallowed without credits, a spend control, a reached limit, or a limit on the model the run uses.
+A reached 5-hour or weekly limit frees up when that window resets, and a used-up credit pool at the start of the next UTC month, so neither ranks with a signed-out login; any other block has no known end.
 
 Codex looks a session name up only among the running login's own files, so `cdx resume <name>` and `cdx fork <name>` replace a session name with its ID from the shared database.
 

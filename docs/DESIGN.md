@@ -25,8 +25,10 @@ macOS 14 and 15 use Material with the same spacing and corner hierarchy.
 Each account has one quota row, titled by its folder name as written, such as `claude-work`, with a ring per window: 5-hour, Weekly, then model-specific or other quotas.
 A ring shows the time left until its window resets inside, such as `1.6h` or `3.2d`, or its percentage when no reset is ahead; all rows share one set of columns titled above the first row, such as `5h`, `Week` or `Credit`, so Claude's and Codex's windows of the same length line up, and an account without a window leaves its column empty.
 A Claude model's own weekly limit, such as Fable's, has no ring: the Week ring's hover lists its percentage.
-Hovering over a ring shows the used percentage, a credit pool's amounts, the reset countdown, the reset time and, at the pace so far in the window, its percentage at reset or when it reaches 100%.
-A Weekly ring with a projection also shows the tokens and cost its percentage has used so far and what 100% comes to; 5-hour rings cannot, since local history is kept by day.
+Hovering over a ring shows the used percentage, the reset countdown and time on one line and, at the pace so far in the window, its percentage at reset or when it reaches 100%.
+Hovering over an account's name shows what the rings leave out, so no fact appears in two hovers.
+With a projection, it shows the tokens and cost the Weekly percentage has used so far and what 100% comes to; 5-hour windows have none, since local history is kept by day.
+It then lists any credit pool's amounts, such as `Usage credits: $50.00 of $50.00` for a Claude usage-credit plan, whose API reports them in cents.
 Claude rows come first, then Codex rows, then Kiro, keeping account order.
 Provider headers weight each listed account's Weekly percentage by its estimated weekly tokens.
 Hovering over a yellow footer time lists each account's errors once.
