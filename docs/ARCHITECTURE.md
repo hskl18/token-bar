@@ -118,7 +118,7 @@ The affected dollar value remains available only when known prices cover at leas
 - Network and parse failures preserve prior successful snapshots.
 - Cancelling a refresh terminates its Codex app-server child and skips the remaining runtimes; spending a reset credit cannot be cancelled.
 - Claude HTTP 401 rereads the credential once, and an account with a 5-hour limit renews through its next window start; see [credential recovery](CLAUDE-USAGE.md#credential-recovery).
-- Fetch and local-scan failures turn the footer time yellow, with details in its tooltip.
+- Fetch and local-scan failures turn the footer time yellow, with details in its hover.
 - Price refresh failure preserves the last-known-good catalog.
 - Cached structures add new fields as optional values or move to a new storage key when counting semantics change.
 
@@ -129,7 +129,7 @@ Transcript ledgers are atomic JSON files under Application Support, written once
 Launch removes weekly window ledgers whose reset time has passed and keeps calendar ledgers, which can hold history whose source files are gone.
 Snapshots, prices, and bounded capacity samples stay in `UserDefaults`.
 It does not retain raw transcript text.
-Activity cards reuse one in-memory summary per provider and interval, which the All and month tooltip lines read too; the Codex per-login and image lines are recomputed when a tooltip renders.
+Activity cards reuse one in-memory summary per provider and interval, which the All and month hover lines read too; the Codex per-login and image lines are recomputed when a hover renders.
 Reconciled Codex account activity is also reused across periods until the snapshot changes.
 Snapshot changes clear these summaries.
 Day-key parsing uses a process-local `NSCache` with an 800-entry target to reuse dates across period queries.

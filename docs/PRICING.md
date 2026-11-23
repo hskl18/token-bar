@@ -17,7 +17,7 @@ The fallback catalog is requested only for models missing from both official sou
 Each source keeps its own ETag, retry time, and last-known-good rows.
 OpenAI tables are read by column name, including the separate legacy-model table within each speed tier.
 One refresh reuses its decoded price catalog and daily history across accounts.
-Failed price refreshes retain saved rates, appear in the existing status tooltip, and wait at least 15 minutes before another attempt.
+Failed price refreshes retain saved rates, appear in the footer time's hover, and wait at least 15 minutes before another attempt.
 
 Unknown models stay unpriced.
 Token Bar extrapolates a period's priced mix only when known prices cover at least 99.9% of its local sample.
@@ -81,7 +81,7 @@ While no connection holds that database's `-shm` file, a read-only open of the W
 Its `tokens_used`, less the cumulative total the last scan of that session read, is split like the same model's local token categories.
 A spawned subagent thread lost before any scan is skipped, because its total starts with its parent's.
 Days without a usable local mix use the period's average rate.
-Each period prices on its own, so the months in a Month or Year tooltip need not add up to the Year card, and a month can show `--` while the year has an amount.
+Each period prices on its own, so the months in the Month hover need not add up to the Year card, and a month can show `--` while the year has an amount.
 An account with no local mix in the period uses the other accounts' combined rate, and the app hides dollars when no account has one.
 
 ## Weekly capacity

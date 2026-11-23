@@ -159,6 +159,8 @@ Claude Code and Codex updates can change what these scripts rely on: where Claud
 There is no need to rerun the merge scripts after every update.
 Every `cl` and `cdx` launch checks the shared links, `sqlite_home`, and re-created Codex databases, and prints `shared history needs repair, run <script>` when one is off.
 Rerunning that script restores a link an update replaced with a folder or file, keeping what it held in the backup, adds a missing `sqlite_home`, and sets aside a re-created Codex database.
+Codex re-creates those databases in a login's own folder whenever it starts there without reading `sqlite_home`: with `--ignore-user-config`, or while `config.toml` is missing, empty, or a broken link.
+It does so without a warning, as Codex CLI 0.170.0 did in a test on November 22, 2026, so the launch check is what notices.
 A link that points somewhere else, or a `sqlite_home` naming another folder, has to be fixed by hand; neither script overwrites it.
 A pick made from a saved reading instead of a live one ends with `saved reading`, which can mean an update changed how a login is read.
 Each launch appends one JSON line to `~/.cache/cl/launch.log` with the pick, the logins read live, and any problems; the file starts over past 1 MB.
