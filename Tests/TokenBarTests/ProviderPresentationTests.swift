@@ -56,7 +56,6 @@ final class ProviderPresentationTests: XCTestCase {
     func testLocalHistoryAloneDoesNotInventAConnectedProvider() {
         var snapshot = AppSnapshot.empty
         snapshot.tokenActivity = TokenActivity(
-            lifetimeTokens: 12,
             daily: [DailyUsageBucket(startDate: "2026-08-31", tokens: 12)]
         )
 
