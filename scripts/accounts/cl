@@ -4,7 +4,9 @@
 The logins are ~/.claude and every signed-in ~/.claude-* folder, and ~/.codex and every signed-in ~/.codex-*
 folder, found the way Token Bar finds them. Each login's quota is read live; a login that cannot be read
 uses the newer of its last live reading and Token Bar's. Once claude-share-projects and codex-share-home
-share the history, `cl --continue` or `cdx resume --last` picks up on whichever login has room.
+share the history, `cl --continue` or `cdx resume --last` picks up on whichever login has room, except that
+`cl` resumes a session on the login that last ran it while that login has room, since Claude Code cannot reuse
+thinking from another organization.
 """
 import hashlib
 import json
@@ -32,9 +34,13 @@ CACHE = f"{HOME}/.cache/cl/quota.json"
 # One JSON line per launch: the pick, which readings were live, and any shared-history problem.
 LOG = f"{HOME}/.cache/cl/launch.log"
 # What the merge scripts link from each extra login to the primary one.
-SHARED = {"cl": ["projects", "file-history", "paste-cache", "session-env"],
+SHARED = {"cl": ["projects", "file-history", "paste-cache", "session-env", "sessions"],
           "cdx": ["sessions", "archived_sessions", "thread-writer-locks", "history.jsonl", "session_index.jsonl",
                   ".tmp/rollout-maintenance.lock"]}
+# Weekly resets closer than this expire together, so the login with the most room goes first among them.
+TIE = 24 * 3600
+# cdx goes first to the login with the most 5-hour room; logins within this many points of it count as tied.
+FIVE_HOUR_TIE = 10
 # Pro-sized windows per Claude plan, from `organizationRateLimitTier`; estimates, since only the 5-hour ratio is published.
 TIERS = {"default_claude_max_5x": 5, "default_claude_max_20x": 20}
 UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -72,8 +78,12 @@ def codex_model(home, args):
         return None
 
 
-def claude_usage(home):
-    """Claude's own reading for the login, or None without a current login token."""
+def claude_oauth(home):
+    """The login's OAuth record, False when signed out, or None when it cannot be read.
+
+    Claude Code keeps it in the macOS Keychain, or in <home>/.credentials.json where there is no Keychain (Linux)
+    or the Keychain refuses it, as a locked one does over SSH.
+    """
     service = "Claude Code-credentials"
     if home != f"{HOME}/.claude":
         service += "-" + hashlib.sha256(home.encode()).hexdigest()[:8]
@@ -82,11 +92,31 @@ def claude_usage(home):
             ["security", "find-generic-password", "-a", os.environ["USER"], "-s", service, "-w"],
             capture_output=True, text=True, timeout=5,
         )
-        # 44 is errSecItemNotFound: signed out, so only a last resort, like a full login.
-        # Any other failure, such as a locked Keychain, stays unknown.
-        if found.returncode == 44:
-            return False, [(100, None)], None
-        oauth = json.loads(found.stdout)["claudeAiOauth"]
+        if found.returncode == 0:
+            return json.loads(found.stdout)["claudeAiOauth"]
+        # 44 is errSecItemNotFound; any other failure, such as a locked Keychain, leaves the login unknown.
+        missing = found.returncode == 44
+    except FileNotFoundError:
+        missing = True  # No `security` command, as on Linux, where the file is the only store.
+    except Exception:
+        missing = False
+    try:
+        with open(f"{home}/.credentials.json") as file:
+            return json.load(file)["claudeAiOauth"]
+    except FileNotFoundError:
+        return False if missing else None
+    except Exception:
+        return None
+
+
+def claude_usage(home):
+    """Claude's own reading for the login, or None without a current login token."""
+    oauth = claude_oauth(home)
+    if oauth is False:
+        return False, [(100, None)], None  # Signed out: only a last resort, like a full login.
+    if oauth is None:
+        return None
+    try:
         if oauth["expiresAt"] / 1000 < time.time() + 60:
             return None  # Only Claude Code may refresh it; a refresh here would rotate its login away.
         request = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
@@ -188,6 +218,39 @@ def session_by_name(args, homes):
     return [args[0], ids[0], *args[2:]] if ids else args
 
 
+def resumed_session(args):
+    """The session `cl` resumes: the ID given to --resume or -r, or with --continue or -c the newest session of
+    this folder; None for a new session or the --resume picker."""
+    for arg, value in zip(args, args[1:] + [""]):
+        if arg in ("--resume", "-r") and UUID.match(value):
+            return value
+        if arg.startswith("--resume=") and UUID.match(arg[len("--resume="):]):
+            return arg[len("--resume="):]
+        if arg in ("--continue", "-c"):
+            folder = f"{HOME}/.claude/projects/" + re.sub(r"[^A-Za-z0-9]", "-", os.getcwd())
+            sessions = [entry for entry in os.scandir(folder) if entry.name.endswith(".jsonl") and entry.is_file()]
+            return max(sessions, key=lambda entry: entry.stat().st_mtime).name[:-len(".jsonl")] if sessions else None
+    return None
+
+
+def last_ran_on(session):
+    """The login folder that last started the session, from the SessionStart hook's log, or None."""
+    owner = None
+    try:
+        with open(f"{HOME}/.claude/account-sessions.jsonl") as file:
+            for line in file:
+                if session in line:
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(entry, dict) and entry.get("sessionId") == session:
+                        owner = entry.get("configDir")
+    except OSError:
+        pass
+    return owner
+
+
 TOOLS = {
     "cl": {
         "homes": logins(f"{HOME}/.claude", ".claude-", [".claude.json", ".credentials.json"]),
@@ -286,6 +349,13 @@ def claude_weight(home):
         return 1
 
 
+def five_hour_room(reading, now):
+    """Percent left in the login's windows other than its weekly one, that is, its 5-hour window."""
+    timed, windows, weekly = reading
+    return min((100 - used for used, reset in windows if reset != weekly and (reset is None or reset > now)),
+               default=100)
+
+
 def expires(reading, now):
     """When the login's weekly quota expires unused: its weekly reset, or its latest known reset for a saved
     reading taken before readings recorded the weekly one. A saved weekly reset that has passed says nothing
@@ -296,14 +366,20 @@ def expires(reading, now):
     return max((reset for used, reset in windows if reset and reset > now), default=float("inf"))
 
 
-def pick(homes, readings, weights, now):
-    """Among time-window logins with room left in every window, the one whose weekly quota resets first, ties
-    going to the most room in Pro-sized units; then credit-only or unread logins by room; else the one that
-    frees up first."""
+def pick(homes, readings, weights, now, five_hour_first=False):
+    """Among time-window logins with room left in every window, the one whose weekly quota resets first, resets
+    within TIE of the first counting as a tie that goes to the most room in Pro-sized units; then credit-only
+    or unread logins by room; else the one that frees up first. With five_hour_first, only the time-window
+    logins within FIVE_HOUR_TIE of the most 5-hour room compete."""
     usable = [h for h in homes if room(readings[h][1], now) > 0]
     timed = [h for h in usable if readings[h][0]]
+    if timed and five_hour_first:
+        most = max(five_hour_room(readings[h], now) for h in timed)
+        timed = [h for h in timed if five_hour_room(readings[h], now) >= most - FIVE_HOUR_TIE]
     if timed:
-        return min(timed, key=lambda h: (expires(readings[h], now), -room(readings[h][1], now) * weights[h]))
+        first = min(expires(readings[h], now) for h in timed)
+        return max((h for h in timed if expires(readings[h], now) <= first + TIE),
+                   key=lambda h: (room(readings[h][1], now) * weights[h], -expires(readings[h], now)))
     if usable:
         return max(usable, key=lambda h: room(readings[h][1], now))
     return min(homes, key=lambda h: wait(readings[h][1], now))
@@ -361,14 +437,23 @@ def main():
         # A login with no reading at all ranks with the credit-only ones.
         readings = {home: readings.get(home) or saved.get(home, (0, (False, [], None)))[1] for home in homes}
     weights = {home: tool["weight"](home) for home in homes}
-    home = pick(homes, readings, weights, now)
+    home = pick(homes, readings, weights, now, five_hour_first=command == "cdx")
+    resumed_note = ""
+    if command == "cl" and sys.argv[1:] != ["--which"]:
+        try:  # A launch must never fail on this lookup; any error keeps the normal pick.
+            session = resumed_session(sys.argv[1:])
+            owner = session and last_ran_on(session)
+            if owner in homes and room(readings[owner][1], now) > 0:
+                home, resumed_note = owner, ", where this session last ran"
+        except Exception:
+            pass
     name = os.path.basename(home).lstrip(".").capitalize()
     left = room(readings[home][1], now)
     # A saved reading can be stale, for example when an update changed how a login stores its credentials.
     saved_note = "" if live.get(home) else ", saved reading" if home in saved else ", no reading"
     if left > 0:
         plan = f" of a {weights[home]}x plan" if weights[home] > 1 else ""
-        print(f"{command}: {name} ({left:.0f}% left{plan}{saved_note})", file=sys.stderr)
+        print(f"{command}: {name} ({left:.0f}% left{plan}{saved_note}{resumed_note})", file=sys.stderr)
     else:
         frees = wait(readings[home][1], now)
         when = "at an unknown time" if frees == float("inf") else time.strftime("at %H:%M", time.localtime(now + frees))
