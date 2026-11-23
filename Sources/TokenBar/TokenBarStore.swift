@@ -1502,9 +1502,10 @@ final class TokenBarStore: ObservableObject {
         // The server's own wait wins: the endpoint has answered again six minutes after a 429, so a fixed
         // 15 minutes only kept an outdated reading. Without one, waits double from the usual 5 minutes up to an hour.
         let delay = retryAfter ?? min(60 * 60, freshnessInterval * pow(2, Double(min(4, failureCount - 1))))
-        provider.nextAllowedRefreshAt = date.addingTimeInterval(delay)
-        provider.error = (provider.error ?? "") + " Next try "
-            + date.addingTimeInterval(delay).formatted(date: .omitted, time: .shortened) + "."
+        // The wait runs from now, when the answer arrived, not from the start of the refresh.
+        let nextTry = Date().addingTimeInterval(delay)
+        provider.nextAllowedRefreshAt = nextTry
+        provider.error = (provider.error ?? "") + " Next try " + nextTry.formatted(date: .omitted, time: .shortened) + "."
     }
 
     private func tokenActivity(for provider: ProviderScope) -> TokenActivity {

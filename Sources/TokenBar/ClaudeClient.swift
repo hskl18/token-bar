@@ -167,7 +167,7 @@ struct ClaudeClient {
             usage = try await fetchUsage(profile: profile, primaryAliases: primaryAliases)
         } catch ClaudeClientError.authenticationExpired {
             // Only Claude Code renews a sign-in, through the prompt that starts a 5-hour window; the starter
-            // skips a login it tried within 15 minutes, so this never runs beside a background renewal.
+            // skips a login it tried within 15 minutes and waits for a renewal already running.
             _ = try await ClaudeWindowStarter.shared.start(profile: profile, primaryAliases: primaryAliases)
             usage = try await fetchUsage(profile: profile, primaryAliases: primaryAliases)
         }
@@ -415,24 +415,30 @@ actor ClaudeWindowStarter {
     static let shared = ClaudeWindowStarter()
     private let log = Logger(subsystem: "com.local.tokenbar", category: "claude-window")
     private var attempts: [String: (date: Date, error: String?)] = [:]
+    private var running: [String: Task<(String?, Bool), Never>] = [:]
 
     // Returns false when the profile already attempted a start within 15 minutes.
     func start(profile: ClaudeAccountProfile?, primaryAliases: [URL] = []) async throws -> Bool {
         let key = profile?.configDirectory.path ?? AccountSource.primaryDirectory(for: .claude).path
+        // A caller during a start waits for it, so a reset reads the sign-in that start renewed.
+        _ = await running[key]?.value
         if let previous = attempts[key], Date().timeIntervalSince(previous.date) < 15 * 60 {
             if let error = previous.error { throw ClaudeClientError.requestFailed(error) }
             return false
         }
         let date = Date()
         attempts[key] = (date, nil)
-        let (error, renewed) = await Task.detached(priority: .utility) { () -> (String?, Bool) in
+        let task = Task.detached(priority: .utility) { () -> (String?, Bool) in
             func signedIn() -> Bool { (try? readClaudeLoginCredential(profile: profile, primaryAliases: primaryAliases)) != nil }
             let lapsed = !signedIn()
             let error = runClaudeToStartWindow(profile: profile, primaryAliases: primaryAliases)
             // A full week refuses the prompt, but Claude Code renews a lapsed sign-in before sending it.
             let renewed = lapsed && signedIn()
             return (renewed ? nil : error, renewed)
-        }.value
+        }
+        running[key] = task
+        let (error, renewed) = await task.value
+        running[key] = nil
         attempts[key] = (date, error.map { "Claude 5-hour window start failed: \($0)" })
         if let error = attempts[key]?.error {
             log.error("\(key, privacy: .public): \(error, privacy: .public)")

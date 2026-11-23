@@ -19,6 +19,7 @@ When `~/.claude` has no credential, `~/.claude.json` names no login, and another
 The endpoint can return HTTP 429 after repeated requests.
 Token Bar keeps the last successful quota value, marks it stale, and records a cooldown.
 The cooldown is the wait the response's `Retry-After` header names; without one it starts at 5 minutes and doubles with each repeated failure, up to 60 minutes.
+A shorter `Retry-After` does not shorten the 5 minutes between automatic readings.
 Opening the menu does not bypass that cooldown.
 
 ## Credential recovery
