@@ -18,14 +18,15 @@ When `~/.claude` has no credential, `~/.claude.json` names no login, and another
 
 The endpoint can return HTTP 429 after repeated requests.
 Token Bar keeps the last successful quota value, marks it stale, and records a cooldown.
-Repeated failures increase the fallback cooldown from 15 minutes to 30 minutes and then 60 minutes.
+The cooldown is the wait the response's `Retry-After` header names; without one it starts at 5 minutes and doubles with each repeated failure, up to 60 minutes.
+A shorter `Retry-After` does not shorten the 5 minutes between automatic readings.
 Opening the menu does not bypass that cooldown.
 
 ## Credential recovery
 
 A credential whose saved expiry has passed counts as an expired sign-in without a request, since Anthropic answers repeated 401s with 429.
 After HTTP 401, Token Bar rereads the account's credential in case Claude Code already renewed it, and retries once with a changed token.
-Claude Code renews a sign-in whenever it runs, so an account with a 5-hour limit and Weekly usage below 100% (or a Weekly reset time that has passed) renews through its next [window start](#starting-5-hour-windows).
+Claude Code renews a sign-in whenever it runs, so an account with a 5-hour limit renews through its next [window start](#starting-5-hour-windows), even at 100% Weekly usage.
 An account without a 5-hour limit, such as a usage-credit Enterprise plan, gets no message: its row keeps the last reading and says "Idle", with the reading's time on hover and without a warning, until Claude Code runs in its folder.
 When Anthropic rejects a refresh token, Claude Code empties the stored tokens, and Token Bar reports that account as signed out.
 HTTP 403 and 429 never start the CLI.
@@ -34,7 +35,7 @@ Token Bar looks for `claude` on `PATH` and in `~/.local/bin`, `/opt/homebrew/bin
 ## Starting 5-hour windows
 
 A 5-hour window starts with its first request, so an idle window reports no current reset time.
-When a refresh finds an idle window, or an expired sign-in on an account with a 5-hour window, and Weekly usage below 100% or past its reset time, Token Bar sends one minimal prompt through the installed CLI:
+When a refresh finds an idle window with Weekly usage below 100% or past its reset time, or an expired sign-in on an account with a 5-hour window, Token Bar sends one minimal prompt through the installed CLI:
 
 ```sh
 claude -p hi --model haiku --effort low --settings '{"alwaysThinkingEnabled":false}' --safe-mode --strict-mcp-config --system-prompt 'Reply with one word.' --no-session-persistence --max-turns 1 --tools ''
@@ -42,6 +43,7 @@ claude -p hi --model haiku --effort low --settings '{"alwaysThinkingEnabled":fal
 
 The flags skip user customizations, tools, thinking, and transcripts, so the prompt stays small and never enters local history.
 Each start still counts against the account's usage limits.
+A full week refuses the prompt and spends nothing, but Claude Code renews an expired sign-in before sending it, and Token Bar counts that as done.
 Anthropic's [credential-use policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) reserves subscription OAuth for ordinary Claude Code use, so Token Bar sends no model request with the stored credential and runs the unmodified CLI instead.
 It still reads that credential to fetch quota and spend reset credits, which may conflict with the same policy.
 Each account tries at most once every 15 minutes, and a refresh one minute after each 5-hour reset starts the next window while the Mac is awake.
@@ -97,7 +99,7 @@ When both identifiers are absent, the current-window scanner uses a deterministi
 The calendar and 7-day scanners share the same compound identity rule and require a scan with no unreadable positive-usage records.
 Treat Claude token and dollar values as local estimates.
 
-Anthropic's personal usage response does not expose an account lifetime token counter comparable to the Codex app-server value used by Token Bar.
+Like the Codex estimate, the Claude weekly estimate counts only this Mac's local records.
 Claude usage from another computer can raise the official weekly percentage without adding tokens to this Mac's local ledger.
 The resulting weekly token capacity and dollar value can therefore be low for multi-device users.
 

@@ -94,12 +94,11 @@ Codex weekly value = current-window estimated cost × 100 / official weekly perc
 Codex extrapolates only current-window observations at or above 3% weekly usage.
 A falling weekly percentage within one reset window invalidates that window's projection.
 It does not multiply a previous window's token capacity by the current model mix; quota consumption can change when the model mix changes.
-If the account counter has not increased or still trails a complete local weekly ledger, Codex uses that local ledger.
 The estimate stays unavailable without a current-window sample or priced model mix, instead of preserving a stale dollar amount.
 Every displayed weekly estimate is bound to its reset time and current percentage; stale or expired readings are excluded.
 With several accounts, a provider header sums each account's available estimate, counting the same login once.
 Each Claude account, primary or extra, smooths its projection with its own earlier windows.
-Extra Codex accounts project only their own current-window records.
+Each Codex account, primary or extra, projects only its own current-window records on this Mac.
 
 Claude uses available local records inside the official 7-day interval.
 Its current-window observations become eligible at 3% used.
@@ -109,16 +108,9 @@ Token Bar retains 12 Claude samples for 70 days, removes large median-absolute-d
 Observations from the same quota bucket and source with start and reset times less than two seconds apart count as one window, retaining its latest sample, including when loading older history.
 Another computer can raise the Claude percentage without adding records on this Mac.
 
-Codex uses:
-
-```text
-current lifetimeTokens - recorded near-start lifetimeTokens
-```
-
-The difference can include another computer on the same account.
-Until Token Bar accepts an account baseline, it uses the available local Codex 7-day ledger as a fallback.
-The account-wide projection uses this Mac's current-window model mix to price account tokens.
-The local fallback requires an exact token match between the ledger and its price mix.
+Codex uses local records inside the official 7-day interval and requires an exact token match between the ledger and its price mix.
+It does not use the app-server's account lifetime counter, which sums whole UTC days and lags by hours: a baseline taken near a weekly reset charged the previous week's late tokens to the new window.
+Another computer can raise the Codex percentage without adding records on this Mac, so the estimate can be low for multi-device users.
 
 ## ImageGen output estimates
 
@@ -159,7 +151,7 @@ All remains unavailable until both providers have usable capacity evidence.
 
 - Daily rates are frozen from the first observation and kept for 400 days; earlier history uses the rates available when it was first priced.
 - Speed and long-context adjustments require recorded request metadata and a published rate.
-- Account counters, local records and quota percentages may differ in scope and update timing; the near-start baseline can omit initial usage.
+- Account counters, local records and quota percentages may differ in scope and update timing.
 - Applying a local price mix to account totals assumes representative models and token categories, with matching calendar dates.
 - A lost thread counts on its last update's UTC day as its last model, and one begun before a window counts its run-time share inside it.
 - A model with no local records leaves its lost threads out, and a user thread that copies another thread's history counts that history if it is lost before any scan.

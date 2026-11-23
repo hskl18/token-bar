@@ -102,6 +102,8 @@ enum ClaudeClientError: LocalizedError {
 }
 
 struct ClaudeClient {
+    private static let log = Logger(subsystem: "com.local.tokenbar", category: "claude-usage")
+
     // One session for every request, since a session is kept until it is invalidated; logins must not share cookies.
     private static let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
@@ -160,7 +162,15 @@ struct ClaudeClient {
               UUID(uuidString: organization) != nil else {
             throw ClaudeClientError.requestFailed("The account in this folder changed. Refresh before using a reset.")
         }
-        let usage = try await fetchUsage(profile: profile, primaryAliases: primaryAliases)
+        let usage: (data: Data, token: String)
+        do {
+            usage = try await fetchUsage(profile: profile, primaryAliases: primaryAliases)
+        } catch ClaudeClientError.authenticationExpired {
+            // Only Claude Code renews a sign-in, through the prompt that starts a 5-hour window; the starter
+            // skips a login it tried within 15 minutes and waits for a renewal already running.
+            _ = try await ClaudeWindowStarter.shared.start(profile: profile, primaryAliases: primaryAliases)
+            usage = try await fetchUsage(profile: profile, primaryAliases: primaryAliases)
+        }
         guard currentAccountID() == expectedAccountID else {
             throw ClaudeClientError.requestFailed("The account changed while checking reset credits. Refresh and try again.")
         }
@@ -206,6 +216,12 @@ struct ClaudeClient {
             }
         }
 
+        if !(200..<300).contains(response.http.statusCode) {
+            // The only record of a failed reading; no token or response body.
+            let folder = (profile?.configDirectory ?? AccountSource.primaryDirectory(for: .claude)).path
+            let retryAfter = response.http.value(forHTTPHeaderField: "Retry-After") ?? "none"
+            Self.log.error("\(folder, privacy: .public): usage HTTP \(response.http.statusCode), Retry-After \(retryAfter, privacy: .public)")
+        }
         if response.http.statusCode == 401 {
             throw ClaudeClientError.authenticationExpired
         }
@@ -324,10 +340,18 @@ struct ClaudeClient {
             var utc = Calendar(identifier: .gregorian)
             utc.timeZone = .gmt
             let monthReset = utc.dateInterval(of: .month, for: Date())?.end
+            // Amounts come in the currency's minor units, such as cents for USD.
+            let money = NumberFormatter()
+            money.numberStyle = .currency
+            money.currencyCode = extra["currency"] as? String ?? "USD"
+            func amount(_ minor: Double) -> String {
+                money.string(from: minor / pow(10, Double(money.maximumFractionDigits)) as NSNumber) ?? ""
+            }
             windows.append(LimitWindow(
                 label: "Usage credits", usedPercent: min(100, max(0, used / limit * 100)),
                 windowMinutes: nil, resetsAt: spendReset.flatMap(parseISO8601) ?? monthReset,
-                limitID: "claude:extra_usage", limitName: "Usage credits"
+                limitID: "claude:extra_usage", limitName: "Usage credits",
+                amounts: "Usage credits: \(amount(used)) of \(amount(limit))"
             ))
         }
 
@@ -391,25 +415,36 @@ actor ClaudeWindowStarter {
     static let shared = ClaudeWindowStarter()
     private let log = Logger(subsystem: "com.local.tokenbar", category: "claude-window")
     private var attempts: [String: (date: Date, error: String?)] = [:]
+    private var running: [String: Task<(String?, Bool), Never>] = [:]
 
     // Returns false when the profile already attempted a start within 15 minutes.
     func start(profile: ClaudeAccountProfile?, primaryAliases: [URL] = []) async throws -> Bool {
         let key = profile?.configDirectory.path ?? AccountSource.primaryDirectory(for: .claude).path
+        // A caller during a start waits for it, so a reset reads the sign-in that start renewed.
+        _ = await running[key]?.value
         if let previous = attempts[key], Date().timeIntervalSince(previous.date) < 15 * 60 {
             if let error = previous.error { throw ClaudeClientError.requestFailed(error) }
             return false
         }
         let date = Date()
         attempts[key] = (date, nil)
-        let error = await Task.detached(priority: .utility) {
-            runClaudeToStartWindow(profile: profile, primaryAliases: primaryAliases)
-        }.value
+        let task = Task.detached(priority: .utility) { () -> (String?, Bool) in
+            func signedIn() -> Bool { (try? readClaudeLoginCredential(profile: profile, primaryAliases: primaryAliases)) != nil }
+            let lapsed = !signedIn()
+            let error = runClaudeToStartWindow(profile: profile, primaryAliases: primaryAliases)
+            // A full week refuses the prompt, but Claude Code renews a lapsed sign-in before sending it.
+            let renewed = lapsed && signedIn()
+            return (renewed ? nil : error, renewed)
+        }
+        running[key] = task
+        let (error, renewed) = await task.value
+        running[key] = nil
         attempts[key] = (date, error.map { "Claude 5-hour window start failed: \($0)" })
         if let error = attempts[key]?.error {
             log.error("\(key, privacy: .public): \(error, privacy: .public)")
             throw ClaudeClientError.requestFailed(error)
         }
-        log.notice("\(key, privacy: .public): 5-hour window started")
+        log.notice("\(key, privacy: .public): \(renewed ? "sign-in renewed" : "5-hour window started", privacy: .public)")
         return true
     }
 }

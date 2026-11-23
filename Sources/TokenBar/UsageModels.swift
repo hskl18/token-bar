@@ -260,17 +260,6 @@ struct TokenActivity: Codable, Hashable {
 }
 
 
-struct CodexAccountWindowBaseline: Codable, Hashable {
-    var windowID: String
-    var windowMinutes: Int
-    var windowStartedAt: Date
-    var resetsAt: Date
-    var lifetimeTokens: Int64
-    var observedAt: Date
-    var startsAtWindowBoundary: Bool
-    var usedPercent: Double? = nil
-}
-
 struct TokenBreakdown: Codable, Hashable {
     var input: Int64 = 0
     var cacheCreationInput: Int64 = 0
@@ -516,11 +505,6 @@ enum WeeklyValueStatus {
     case unavailable(String)
 }
 
-enum CodexWeeklyEstimateSource: String, Codable, Hashable {
-    case accountLifetime
-    case localWindowFallback
-}
-
 struct AppSnapshot: Codable, Hashable {
     var claude: ProviderSnapshot
     var additionalClaudeAccounts: [ClaudeAccountSnapshot]? = nil
@@ -544,8 +528,6 @@ struct AppSnapshot: Codable, Hashable {
     var claudeWeeklyValueError: String?
     var codexWeeklyValue: WeeklyValueEstimate?
     var codexWeeklyValueError: String?
-    var codexWeeklyEstimateSource: CodexWeeklyEstimateSource?
-    var codexAccountWindowBaselines: [CodexAccountWindowBaseline]?
     var codexWeeklyEstimateVersion: Int?
     var codexWeeklyInvalidatedReset: Date? = nil
     var codexActivityError: String?
@@ -566,8 +548,6 @@ struct AppSnapshot: Codable, Hashable {
         claudeWeeklyValueError: nil,
         codexWeeklyValue: nil,
         codexWeeklyValueError: nil,
-        codexWeeklyEstimateSource: nil,
-        codexAccountWindowBaselines: [],
         codexWeeklyEstimateVersion: 5,
         codexActivityError: nil,
         codexActivityLastSuccessAt: nil,
