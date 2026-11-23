@@ -163,10 +163,7 @@ private func makeActivity(now: Date, dailyTokens: [Int: Int64]) -> TokenActivity
         guard let date = calendar.date(byAdding: .day, value: -daysAgo, to: now) else { return nil }
         return DailyUsageBucket(startDate: previewDayFormatter.string(from: date), tokens: tokens)
     }.sorted { $0.startDate < $1.startDate }
-    return TokenActivity(
-        lifetimeTokens: buckets.reduce(0) { $0 + $1.tokens },
-        daily: buckets
-    )
+    return TokenActivity(daily: buckets)
 }
 
 private func makeCostLedger(activity: TokenActivity, usdPerToken: Double) -> CostLedger {

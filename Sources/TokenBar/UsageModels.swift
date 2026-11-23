@@ -184,12 +184,11 @@ struct DailyUsageBucket: Codable, Hashable, Identifiable {
 }
 
 struct TokenActivity: Codable, Hashable {
-    var lifetimeTokens: Int64?
     var daily: [DailyUsageBucket]
     // Codex account buckets are UTC days; each belongs to the local day containing its midpoint.
     var utcDays: Bool? = nil
 
-    static let empty = TokenActivity(lifetimeTokens: nil, daily: [])
+    static let empty = TokenActivity(daily: [])
 
     func supplementing(with ledger: CostLedger?) -> TokenActivity {
         guard let recorded = ledger?.recordedTokensByDay, utcDays == true || daily.isEmpty else { return self }
@@ -201,7 +200,6 @@ struct TokenActivity: Codable, Hashable {
             totals[day] = max(totals[day] ?? 0, tokens)
         }
         return TokenActivity(
-            lifetimeTokens: lifetimeTokens,
             daily: totals.map { DailyUsageBucket(startDate: $0.key, tokens: $0.value) }
                 .sorted { $0.startDate < $1.startDate },
             utcDays: true

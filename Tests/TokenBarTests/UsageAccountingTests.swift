@@ -7,7 +7,6 @@ final class UsageAccountingTests: XCTestCase {
         calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
         let start = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 10, day: 11)))
         let activity = TokenActivity(
-            lifetimeTokens: nil,
             daily: ["2026-10-10", "2026-10-11", "2026-10-12"].map { DailyUsageBucket(startDate: $0, tokens: 1) },
             utcDays: true
         )

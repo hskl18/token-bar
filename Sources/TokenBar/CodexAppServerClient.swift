@@ -430,6 +430,7 @@ func parseCodexQuota(_ response: [String: Any]?) throws -> ProviderSnapshot {
 private func parseActivity(_ response: [String: Any]?) throws -> TokenActivity {
     let result = try resultDictionary(response)
     let summary = dictionary(result["summary"])
+    // A login with no usage yet reports a lifetime total and no days, which is a valid empty reading.
     let lifetime = int64(summary?["lifetimeTokens"])
     let rawBuckets = result["dailyUsageBuckets"] as? [Any] ?? []
     let buckets = rawBuckets.compactMap { value -> DailyUsageBucket? in
@@ -446,7 +447,7 @@ private func parseActivity(_ response: [String: Any]?) throws -> TokenActivity {
             "Unreadable Codex usage totals."
         )
     }
-    return TokenActivity(lifetimeTokens: lifetime, daily: buckets)
+    return TokenActivity(daily: buckets)
 }
 
 private func resultDictionary(_ response: [String: Any]?) throws -> [String: Any] {

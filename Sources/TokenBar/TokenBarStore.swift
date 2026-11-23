@@ -365,7 +365,6 @@ final class TokenBarStore: ObservableObject {
                     switch result.activity {
                     case let .success(resultActivity):
                         let activity = TokenActivity(
-                            lifetimeTokens: resultActivity.lifetimeTokens,
                             daily: recentBuckets(resultActivity.daily),
                             utcDays: true
                         )
@@ -1265,7 +1264,7 @@ final class TokenBarStore: ObservableObject {
             switch fetched.activity {
             case let .success(activity):
                 account.tokenActivity = TokenActivity(
-                    lifetimeTokens: activity.lifetimeTokens, daily: recentBuckets(activity.daily), utcDays: true
+                    daily: recentBuckets(activity.daily), utcDays: true
                 )
                 account.activityLastSuccessAt = date
                 estimateFailures["\(account.name) usage"] = nil
@@ -1687,7 +1686,7 @@ final class TokenBarStore: ObservableObject {
                 tokens: models.values.reduce(0) { $0 + $1.total }
             )
         }.sorted { $0.startDate < $1.startDate }
-        return TokenActivity(lifetimeTokens: nil, daily: daily)
+        return TokenActivity(daily: daily)
     }
 }
 
