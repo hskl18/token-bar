@@ -112,6 +112,17 @@ final class TokenBarStore: ObservableObject {
             return
         }
 
+        // A reset first reads the usage endpoint, so it waits out that account's rate-limit cooldown too.
+        let quota = provider != .claude ? nil : isPrimary ? snapshot.claude
+            : snapshot.additionalClaudeAccounts?.first { $0.sourceDirectory == directory.path }?.quota
+        if let cooldown = quota?.nextAllowedRefreshAt, cooldown > Date() {
+            let wait = NSAlert()
+            wait.messageText = "\(name) is rate limited"
+            wait.informativeText = "Try the reset after \(cooldown.formatted(date: .omitted, time: .shortened))."
+            wait.runModal()
+            return
+        }
+
         isResettingQuota = true
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -531,7 +542,7 @@ final class TokenBarStore: ObservableObject {
                     let mix = await catalog.costMix(for: ledger.mixLedger)
                     if case let .available(estimate) = weeklyValueEstimate(
                         capacity: currentCapacity(window: window, observedTokens: ledger.observedTokens),
-                        observedTokens: ledger.observedTokens, costMix: mix, requiresExactTokenMatch: true,
+                        observedTokens: ledger.observedTokens, costMix: mix,
                         resetsAt: window.resetsAt
                     ) { weeklyValue = estimate }
                 }
@@ -1126,7 +1137,6 @@ final class TokenBarStore: ObservableObject {
             capacity: capacity,
             observedTokens: ledger.observedTokens,
             costMix: costMix,
-            requiresExactTokenMatch: true,
             resetsAt: window.resetsAt
         )
         switch status {
@@ -1183,7 +1193,6 @@ final class TokenBarStore: ObservableObject {
             capacity: capacity,
             observedTokens: ledger.observedTokens,
             costMix: costMix,
-            requiresExactTokenMatch: true,
             resetsAt: window.resetsAt
         ) {
         case let .available(estimate):
@@ -1306,7 +1315,7 @@ final class TokenBarStore: ObservableObject {
         )
         guard case let .available(estimate) = weeklyValueEstimate(
             capacity: capacity, observedTokens: ledger.observedTokens, costMix: mix,
-            requiresExactTokenMatch: true, resetsAt: reset
+            resetsAt: reset
         ) else { return nil }
         return estimate
     }
@@ -1332,7 +1341,6 @@ final class TokenBarStore: ObservableObject {
         capacity: WeeklyTokenCapacityEstimate?,
         observedTokens: Int64,
         costMix: CostMix,
-        requiresExactTokenMatch: Bool,
         resetsAt: Date?
     ) -> WeeklyValueStatus {
         guard let capacity else {
@@ -1342,7 +1350,7 @@ final class TokenBarStore: ObservableObject {
             return .unavailable("No local usage in this weekly window yet.")
         }
         guard costMix.missingModels.isEmpty,
-              (!requiresExactTokenMatch || costMix.sampledTokens == observedTokens),
+              costMix.sampledTokens == observedTokens,
               let rate = costMix.usdPerToken,
               let observedCost = costMix.estimate(tokens: observedTokens)
         else {
@@ -1501,8 +1509,9 @@ final class TokenBarStore: ObservableObject {
         // The server's own wait wins: the endpoint has answered again six minutes after a 429, so a fixed
         // 15 minutes only kept an outdated reading. Without one, waits double from the usual 5 minutes up to an hour.
         let delay = retryAfter ?? min(60 * 60, freshnessInterval * pow(2, Double(min(4, failureCount - 1))))
-        // The wait runs from now, when the answer arrived, not from the start of the refresh.
-        let nextTry = Date().addingTimeInterval(delay)
+        // The wait runs from now, when the answer arrived, not from the start of the refresh, and never
+        // shortens a longer one already in force.
+        let nextTry = max(Date().addingTimeInterval(delay), provider.nextAllowedRefreshAt ?? .distantPast)
         provider.nextAllowedRefreshAt = nextTry
         provider.error = (provider.error ?? "") + " Next try " + nextTry.formatted(date: .omitted, time: .shortened) + "."
     }

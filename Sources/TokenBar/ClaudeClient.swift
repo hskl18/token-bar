@@ -278,6 +278,7 @@ struct ClaudeClient {
         do {
             (data, response) = try await Self.session.data(for: request)
         } catch {
+            Self.log.error("request failed: \(error.localizedDescription, privacy: .public)")
             throw ClaudeClientError.requestFailed("Claude usage request failed: \(error.localizedDescription)")
         }
 
@@ -417,11 +418,17 @@ actor ClaudeWindowStarter {
     private var attempts: [String: (date: Date, error: String?)] = [:]
     private var running: [String: Task<(String?, Bool), Never>] = [:]
 
+    private static func failure(_ reason: String) -> String { "Claude 5-hour window start failed: \(reason)" }
+
     // Returns false when the profile already attempted a start within 15 minutes.
     func start(profile: ClaudeAccountProfile?, primaryAliases: [URL] = []) async throws -> Bool {
         let key = profile?.configDirectory.path ?? AccountSource.primaryDirectory(for: .claude).path
-        // A caller during a start waits for it, so a reset reads the sign-in that start renewed.
-        _ = await running[key]?.value
+        // A caller during a start waits for it and takes its result, so a reset reads the sign-in that start
+        // renewed, or reports why it could not.
+        if let task = running[key] {
+            if let error = await task.value.0 { throw ClaudeClientError.requestFailed(Self.failure(error)) }
+            return false
+        }
         if let previous = attempts[key], Date().timeIntervalSince(previous.date) < 15 * 60 {
             if let error = previous.error { throw ClaudeClientError.requestFailed(error) }
             return false
@@ -439,7 +446,7 @@ actor ClaudeWindowStarter {
         running[key] = task
         let (error, renewed) = await task.value
         running[key] = nil
-        attempts[key] = (date, error.map { "Claude 5-hour window start failed: \($0)" })
+        attempts[key] = (date, error.map(Self.failure))
         if let error = attempts[key]?.error {
             log.error("\(key, privacy: .public): \(error, privacy: .public)")
             throw ClaudeClientError.requestFailed(error)
