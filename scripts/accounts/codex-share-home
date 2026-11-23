@@ -65,8 +65,12 @@ backup = None  # set on --apply
 
 def codex_processes():
     """Codex processes on the other login: (pid, is the managed daemon, command)."""
-    # -E appends each process's environment, which holds CODEX_HOME.
-    listing = subprocess.run(["ps", "-axEww", "-o", "pid=,command="], capture_output=True, text=True).stdout
+    # -E (macOS) or e (procps) appends each process's environment, which holds CODEX_HOME.
+    flags = "-axEww" if sys.platform == "darwin" else "axeww"
+    ps = subprocess.run(["ps", flags, "-o", "pid=,command="], capture_output=True, text=True)
+    if ps.returncode:  # an empty listing would wave --apply past a running Codex
+        sys.exit(f"ps failed: {ps.stderr.strip()}")
+    listing = ps.stdout
     found = []
     for line in listing.splitlines():
         pid, _, command = line.strip().partition(" ")

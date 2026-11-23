@@ -69,11 +69,12 @@ claude-share-projects
 claude-share-projects --apply
 ```
 
-The merge moves `projects`, `file-history`, `paste-cache`, and `session-env` from each extra login into `~/.claude` and links them back.
+The merge moves `projects`, `file-history`, `paste-cache`, `session-env`, and `sessions` from each extra login into `~/.claude` and links them back.
+`sessions` lists the running Claude Code processes, one file each, so sessions of every login can find each other.
 A transcript both logins hold keeps every line from both copies.
 For other files that differ, the newer copy wins.
 Duplicates and replaced copies move to `~/.claude-share-backup-<time>/`; nothing is deleted.
-Credentials, `sessions`, and settings stay with each login.
+Credentials and settings stay with each login.
 `--apply` refuses while a Claude Code session runs or while a login lacks the hook, including a hook limited by a `matcher`, since resumed, cleared, and forked sessions also start under another login.
 
 ## Keep `~/.claude` as the shared folder only
@@ -127,12 +128,15 @@ cdx resume --last
 
 Both launchers read each login's quota live, from Claude's usage endpoint or from `codex app-server`, which usually takes about a second; a Codex cold start over a large shared history can take several seconds.
 They measure room in Pro-sized windows: a Claude Max 5x login counts five times its percentage and Max 20x twenty times, read from each login's `.claude.json`; these ratios are estimates, and Codex logins count once.
-Among logins with room left in both their 5-hour and weekly windows, they pick the one whose weekly window resets first, so quota that would expire unused goes first; equal resets go to the one with the most room.
+Among logins with room left in both their 5-hour and weekly windows, they pick the one whose weekly window resets first, so quota that would expire unused goes first; resets within 24 hours of the first count as a tie, which goes to the one with the most room.
+`cdx` first narrows the choice to the logins within 10 points of the most 5-hour room.
+`cl --continue` and `cl --resume <id>` stay on the login that last ran the session while it has room, since Claude Code cannot reuse thinking from another organization.
 A login close to its limit can run out mid-session; with the shared history, the next launch can resume that session on another login.
 A saved reading from before launchers recorded the weekly reset uses its latest reset instead.
 Credit-only logins, such as an Enterprise trial, come last.
 When every login is at a limit, they pick the one that frees up first.
 A login that cannot be read live uses the newer of its last live reading and Token Bar's.
+A Claude login is read from the Keychain, or from its `.credentials.json` where there is no Keychain or the Keychain refuses it, as a locked one does over SSH.
 `cdx` treats a Codex login as blocked when Codex itself would: ordinary usage disallowed without credits, a spend control, a reached limit, or a limit on the model the run uses.
 A reached 5-hour or weekly limit frees up when that window resets, and a used-up credit pool at the start of the next UTC month, so neither ranks with a signed-out login; any other block has no known end.
 

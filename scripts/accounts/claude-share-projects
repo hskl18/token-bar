@@ -24,8 +24,8 @@ OTHERS = [f"{HOME}/{name}" for name in sorted(os.listdir(HOME))
           if name.startswith(".claude-") and os.path.isdir(f"{HOME}/{name}") and not os.path.islink(f"{HOME}/{name}")
           and any(os.path.isfile(f"{HOME}/{name}/{marker}") and not os.path.islink(f"{HOME}/{name}/{marker}")
                   for marker in (".claude.json", ".credentials.json"))]
-# `sessions` stays per account: it lists live processes, not conversations.
-SHARED = ["projects", "file-history", "paste-cache", "session-env"]
+# `sessions` is the live-process registry (one file per pid): shared, sessions of every login find each other to message.
+SHARED = ["projects", "file-history", "paste-cache", "session-env", "sessions"]
 OWNERS = f"{PRIMARY}/account-sessions.jsonl"
 SESSION_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 LINK = re.compile(r"\]\(([^)]+)\)")
