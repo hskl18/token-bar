@@ -57,6 +57,7 @@ Neither provider's spend request is automatically retried.
 
 Before sending a spend, Token Bar invalidates the saved reset-count freshness so a quit cannot restore a usable old button.
 A request that fails with HTTP 429 spent nothing, so the saved count becomes usable again.
+While a Claude account's rate-limit cooldown runs, a reset click says when it ends and sends nothing, since a reset first reads the usage endpoint.
 Success and failure both schedule a refresh of the selected account, respecting existing rate-limit cooldowns.
 Reset credits were not consumed to verify this implementation.
 
